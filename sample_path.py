@@ -51,7 +51,7 @@ common_download_kwargs = {'cache': True}
 
 for candidate_name in candidate_list:
     print(f"\n--- Processing {candidate_name} ---")
-    print(f"Attempting to fetch {candidate_name} posterior (cache: {ABS_CACHE_DIR}, using astropy cache: True) …")
+    print(f"Attempting to fetch {candidate_name} posterior (astropy cache: {ABS_CACHE_DIR}) …")
     post = None
     try:
         post = fetch_open_samples(candidate_name, outdir=ABS_CACHE_DIR, download_kwargs=common_download_kwargs)
@@ -59,30 +59,33 @@ for candidate_name in candidate_list:
         if hasattr(post, 'samples_dict') and post.samples_dict:
             successful_candidates[candidate_name] = list(post.samples_dict.keys())
             print(f"Available sample keys: {successful_candidates[candidate_name]}")
-        elif isinstance(post, dict): # Handles cases where post might be a SamplesDict itself
+        elif isinstance(post, dict):
             successful_candidates[candidate_name] = list(post.keys())
             print(f"Available sample keys (direct dict): {successful_candidates[candidate_name]}")
         else:
             print(f"Fetched {candidate_name}, but no sample_dict found or it is empty. Type: {type(post)}")
             failed_candidates[candidate_name] = f"No sample_dict or empty (Type: {type(post)})"
 
-    except ValueError as e:
+    except Exception as e:  # Catch generic Exception first
         error_message = str(e)
+        handled_specific_error = False
+
         if "Found multiple posterior sample tables" in error_message:
+            handled_specific_error = True
             print(f"Caught error for {candidate_name}: Multiple posterior tables found within the data file.")
             match = re.search(r"Found multiple posterior sample tables in .*?: (.*)\. Not sure which to load\.", error_message)
             if match:
                 table_names_str = match.group(1)
                 available_tables = [name.strip() for name in table_names_str.split(',')]
                 if available_tables:
-                    chosen_table = available_tables[0]  # Choose the first one
+                    chosen_table = available_tables[0]
                     print(f"Retrying with the first available table: '{chosen_table}'")
                     try:
                         post_retry = fetch_open_samples(
                             candidate_name,
                             outdir=ABS_CACHE_DIR,
                             path_to_samples=chosen_table,
-                            download_kwargs=common_download_kwargs
+                            cache=True # Ensure cache is also used on retry
                         )
                         print(f"Successfully fetched {candidate_name} on retry with table '{chosen_table}'.")
                         if hasattr(post_retry, 'samples_dict') and post_retry.samples_dict:
@@ -96,22 +99,26 @@ for candidate_name in candidate_list:
                             failed_candidates[candidate_name] = f"Retry success, but no sample_dict (Type: {type(post_retry)})"
                     except Exception as retry_e:
                         print(f"ERROR for {candidate_name} on retry with table '{chosen_table}': {retry_e}")
-                        failed_candidates[candidate_name] = f"Retry failed: {retry_e}"
+                        failed_candidates[candidate_name] = f"Retry failed for table '{chosen_table}': {retry_e}"
                 else:
                     print(f"Could not parse table names from error message for {candidate_name}.")
-                    failed_candidates[candidate_name] = "Failed to parse multiple tables error"
+                    failed_candidates[candidate_name] = "Failed to parse multiple tables error (no tables found in string)"
             else:
                 print(f"Could not parse table names from error message format for {candidate_name}.")
                 failed_candidates[candidate_name] = "Regex failed for multiple tables error"
-        elif "Unknown URL" in error_message:
+        
+        elif "Unknown URL" in error_message: # Check this specific known error string
+            handled_specific_error = True
             print(f"ERROR for {candidate_name}: Unknown URL. Data cannot be fetched automatically.")
             failed_candidates[candidate_name] = "Unknown URL"
-        else:
-            print(f"A ValueError occurred for {candidate_name}: {e}")
-            failed_candidates[candidate_name] = f"ValueError: {e}"
-    except Exception as e:
-        print(f"An UNEXPECTED error occurred for {candidate_name}: {e}")
-        failed_candidates[candidate_name] = f"Unexpected error: {e}"
+        
+        if not handled_specific_error: # If the error was not one of the above string matches
+            if isinstance(e, ValueError): # Check if it was originally a ValueError
+                 print(f"A ValueError (not matching known patterns) occurred for {candidate_name}: {e}")
+                 failed_candidates[candidate_name] = f"ValueError: {e}"
+            else: # Otherwise, it's some other unexpected exception
+                 print(f"An UNEXPECTED error (not matching known patterns) occurred for {candidate_name}: {e}")
+                 failed_candidates[candidate_name] = f"Unexpected error: {e}"
 
 print("\n--- Processing Summary ---")
 print(f"Successfully processed {len(successful_candidates)} candidates:")
