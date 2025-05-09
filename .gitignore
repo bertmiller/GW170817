@@ -5,3 +5,11 @@ GLADE+.txt
 GLADE_2.4.txt
 H0_posterior.pdf
 H0_samples.npy
+__pycache__/
+pesummary_cache/
+*.pdf
+*.npy
+*.txt
+*.csv
+*.json
+*.jsonl
