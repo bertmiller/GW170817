@@ -1,12 +1,15 @@
 import os
 import sys
 import re
+import logging
+
+logger = logging.getLogger(__name__)
 
 try:
     from pesummary.gw.fetch import fetch_open_samples
     from astropy.utils.data import conf as astropy_conf
 except ImportError:
-    print("ERROR: pesummary or astropy not installed. Please install dependencies.", file=sys.stderr)
+    logger.critical("ERROR: pesummary or astropy not installed. Please install dependencies.")
     # Depending on how you want to handle this, you could raise an ImportError
     # for the importing script to catch, or exit here.
     sys.exit("❌ Install dependencies first: pip install pesummary healpy emcee astropy pandas matplotlib scipy")
@@ -28,20 +31,20 @@ def configure_astropy_cache(cache_dir_base=DEFAULT_CACHE_DIR_NAME):
     if not os.path.exists(abs_cache_dir):
         try:
             os.makedirs(abs_cache_dir)
-            print(f"Created cache directory: {abs_cache_dir}")
+            logger.info(f"Created cache directory: {abs_cache_dir}")
         except OSError as e:
-            print(f"Error creating cache directory {abs_cache_dir}: {e}", file=sys.stderr)
+            logger.error(f"Error creating cache directory {abs_cache_dir}: {e}")
             return None # Indicate failure
             
     astropy_conf.cache_dir = abs_cache_dir
-    print(f"Configured Astropy cache directory: {astropy_conf.cache_dir}")
+    logger.info(f"Configured Astropy cache directory: {astropy_conf.cache_dir}")
 
     # Ensure Astropy is allowed to download files
     if hasattr(astropy_conf, 'allow_remote_data') and not astropy_conf.allow_remote_data:
-        print("Setting astropy_conf.allow_remote_data = True")
+        logger.info("Setting astropy_conf.allow_remote_data = True")
         astropy_conf.allow_remote_data = True
     elif hasattr(astropy_conf, 'remote_data_strict') and astropy_conf.remote_data_strict: # Older Astropy
-        print("Setting astropy_conf.remote_data_strict = False")
+        logger.info("Setting astropy_conf.remote_data_strict = False")
         astropy_conf.remote_data_strict = False
     return abs_cache_dir
 
@@ -62,7 +65,7 @@ def fetch_candidate_data(candidate_name, configured_cache_dir):
                - If successful: (True, pesummary_object)
                - If failed: (False, error_message_string)
     """
-    print(f"Attempting to fetch {candidate_name} posterior (using astropy cache: {configured_cache_dir}) …")
+    logger.info(f"Attempting to fetch {candidate_name} posterior (using astropy cache: {configured_cache_dir}) …")
     
     # Using the download_kwargs structure as per your last working version
     common_download_kwargs = {'cache': True}
@@ -86,14 +89,14 @@ def fetch_candidate_data(candidate_name, configured_cache_dir):
         error_message = str(e)
         
         if "Found multiple posterior sample tables" in error_message:
-            print(f"Caught error for {candidate_name}: Multiple posterior tables found. Attempting retry.")
+            logger.warning(f"Caught error for {candidate_name}: Multiple posterior tables found. Attempting retry.")
             match = re.search(r"Found multiple posterior sample tables in .*?: (.*)\. Not sure which to load\.", error_message)
             if match:
                 table_names_str = match.group(1)
                 available_tables = [name.strip() for name in table_names_str.split(',')]
                 if available_tables:
                     chosen_table = available_tables[0]
-                    print(f"Retrying {candidate_name} with the first available table: '{chosen_table}'")
+                    logger.info(f"Retrying {candidate_name} with the first available table: '{chosen_table}'")
                     try:
                         post_retry = fetch_open_samples(
                             candidate_name,
@@ -108,30 +111,38 @@ def fetch_candidate_data(candidate_name, configured_cache_dir):
                         else:
                             return False, f"Retry for {candidate_name} successful, but no sample_dict. Type: {type(post_retry)}"
                     except Exception as retry_e:
+                        logger.error(f"Retry for {candidate_name} with table '{chosen_table}' FAILED: {retry_e}")
                         return False, f"Retry for {candidate_name} with table '{chosen_table}' FAILED: {retry_e}"
                 else:
+                    logger.error(f"Could not parse table names from error for {candidate_name}: No tables found in string.")
                     return False, f"Could not parse table names from error for {candidate_name}: No tables found in string."
             else:
+                logger.error(f"Could not parse table names from error for {candidate_name}: Regex failed.")
                 return False, f"Could not parse table names from error for {candidate_name}: Regex failed."
         
         elif "Unknown URL" in error_message:
+            logger.error(f"Unknown URL for {candidate_name}.")
             return False, f"Unknown URL for {candidate_name}."
         
         else: # Other errors
+            logger.error(f"Unexpected error for {candidate_name}: {error_message}")
             return False, f"Unexpected error for {candidate_name}: {error_message}"
 
 if __name__ == "__main__":
-    # This block runs if the script is executed directly (e.g., python gw_data_fetcher.py)
-    # Useful for testing the module itself.
-    
-    print("--- Testing gw_data_fetcher module ---")
+    # Configure basic logging for standalone testing
+    logging.basicConfig(
+        level=logging.DEBUG, 
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[logging.StreamHandler(sys.stdout)]
+    )
+    logger.info("--- Testing gw_data_fetcher module ---")
     
     # Configure cache for the test
     # Uses the DEFAULT_CACHE_DIR_NAME defined in this module
     test_cache_dir = configure_astropy_cache() 
 
     if not test_cache_dir:
-        print("CRITICAL: Failed to configure cache directory for module test. Exiting.", file=sys.stderr)
+        logger.critical("CRITICAL: Failed to configure cache directory for module test. Exiting.")
         sys.exit(1)
 
     test_candidates = [
@@ -144,20 +155,20 @@ if __name__ == "__main__":
     all_results = {}
 
     for candidate in test_candidates:
-        print(f"\n--- Testing candidate: {candidate} ---")
+        logger.info(f"\n--- Testing candidate: {candidate} ---")
         success_status, result = fetch_candidate_data(candidate, test_cache_dir)
         all_results[candidate] = {"success": success_status, "details": result}
         if success_status:
-            print(f"Successfully fetched test candidate: {candidate}")
+            logger.info(f"Successfully fetched test candidate: {candidate}")
             # For display, show keys if available
             if hasattr(result, 'samples_dict') and result.samples_dict:
-                 print(f"  Sample keys: {list(result.samples_dict.keys())}")
+                 logger.debug(f"  Sample keys: {list(result.samples_dict.keys())}")
             elif isinstance(result, dict):
-                 print(f"  Sample keys (direct dict): {list(result.keys())}")
+                 logger.debug(f"  Sample keys (direct dict): {list(result.keys())}")
         else:
-            print(f"Failed to fetch test candidate {candidate}: {result}")
+            logger.error(f"Failed to fetch test candidate {candidate}: {result}")
             
-    print("\n--- Module Test Summary ---")
+    logger.info("\n--- Module Test Summary ---")
     for candidate, res_info in all_results.items():
         status_str = "SUCCESS" if res_info["success"] else "FAILED"
         details_str = ""
@@ -170,4 +181,4 @@ if __name__ == "__main__":
                 details_str = "Data object present"
         else:
             details_str = res_info["details"] # Error message
-        print(f"  {candidate}: {status_str} - {details_str}") 
+        logger.info(f"  {candidate}: {status_str} - {details_str}") 

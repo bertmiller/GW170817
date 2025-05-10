@@ -2,6 +2,9 @@ import os
 import sys
 import urllib.request
 import pandas as pd
+import logging
+
+logger = logging.getLogger(__name__)
 
 # --- Catalog Configurations ---
 CATALOG_CONFIGS = {
@@ -55,7 +58,7 @@ def download_and_load_galaxy_catalog(catalog_type='glade+'):
     config = CATALOG_CONFIGS.get(catalog_type.lower())
 
     if not config:
-        print(f"❌ Unknown catalog type: {catalog_type}. Available types: {list(CATALOG_CONFIGS.keys())}")
+        logger.error(f"❌ Unknown catalog type: {catalog_type}. Available types: {list(CATALOG_CONFIGS.keys())}")
         return pd.DataFrame()
 
     url = config['url']
@@ -66,15 +69,15 @@ def download_and_load_galaxy_catalog(catalog_type='glade+'):
     catalog_name_print = config['display_name']
 
     if not os.path.exists(filename):
-        print(f"Downloading {catalog_name_print} catalogue ({url}) …")
+        logger.info(f"Downloading {catalog_name_print} catalogue ({url}) …")
         # Note: GLADE+ is ~6GB, GLADE 2.4 is ~450MB. Download message is generic.
         try:
             urllib.request.urlretrieve(url, filename)
         except Exception as e:
-            print(f"❌ Error downloading {catalog_name_print} catalog: {e}")
+            logger.error(f"❌ Error downloading {catalog_name_print} catalog: {e}")
             return pd.DataFrame()
 
-    print(f"Reading {catalog_name_print} from {filename}...")
+    logger.info(f"Reading {catalog_name_print} from {filename}...")
     try:
         glade_df = pd.read_csv(
             filename,
@@ -85,10 +88,10 @@ def download_and_load_galaxy_catalog(catalog_type='glade+'):
             low_memory=False,
             na_values=na_vals,
         )
-        print(f"  {len(glade_df):,} total rows read from {catalog_name_print} specified columns.")
+        logger.info(f"  {len(glade_df):,} total rows read from {catalog_name_print} specified columns.")
         return glade_df
     except Exception as e:
-        print(f"❌ Error reading {catalog_name_print} catalog: {e}")
+        logger.error(f"❌ Error reading {catalog_name_print} catalog: {e}")
         return pd.DataFrame()
 
 def clean_galaxy_catalog(glade_df, numeric_cols=['PGC', 'ra', 'dec', 'z'], cols_to_dropna=['ra', 'dec', 'z'], range_filters=DEFAULT_RANGE_CHECKS):
@@ -106,10 +109,10 @@ def clean_galaxy_catalog(glade_df, numeric_cols=['PGC', 'ra', 'dec', 'z'], cols_
         pd.DataFrame: Cleaned galaxy catalog, or an empty DataFrame if all rows are dropped.
     """
     if glade_df.empty:
-        print("  Input DataFrame for cleaning is empty. Returning empty.")
+        logger.info("  Input DataFrame for cleaning is empty. Returning empty.")
         return pd.DataFrame()
 
-    print("Cleaning GLADE data...")
+    logger.info("Cleaning GLADE data...")
     df_cleaned = glade_df.copy()
 
     for c in numeric_cols:
@@ -118,26 +121,26 @@ def clean_galaxy_catalog(glade_df, numeric_cols=['PGC', 'ra', 'dec', 'z'], cols_
             # but for GLADE it's usually numeric. Coerce errors for robustness.
             df_cleaned[c] = pd.to_numeric(df_cleaned[c], errors='coerce')
         else:
-            print(f"⚠️ Warning: Column {c} not found for numeric conversion during cleaning.")
+            logger.warning(f"⚠️ Warning: Column {c} not found for numeric conversion during cleaning.")
 
     initial_count = len(df_cleaned)
     df_cleaned = df_cleaned.dropna(subset=cols_to_dropna)
-    print(f"  {len(df_cleaned):,} galaxies kept after dropping NaNs in {cols_to_dropna} (from {initial_count}).")
+    logger.info(f"  {len(df_cleaned):,} galaxies kept after dropping NaNs in {cols_to_dropna} (from {initial_count}).")
 
     if df_cleaned.empty:
-        print("  No galaxies remaining after dropping NaNs. Cannot proceed with range checks.")
+        logger.info("  No galaxies remaining after dropping NaNs. Cannot proceed with range checks.")
         return df_cleaned
 
     # Ensure necessary columns for range checks exist after potential drops/coercions
     required_range_cols = ['ra', 'dec', 'z']
     if not all(col in df_cleaned.columns for col in required_range_cols):
-        print(f"  Critical columns for range checks ({required_range_cols}) are missing. Skipping range checks.")
+        logger.warning(f"  Critical columns for range checks ({required_range_cols}) are missing. Skipping range checks.")
         return df_cleaned
     
     # Filter out rows where any of these critical columns became NaN after coercion but weren't in cols_to_dropna initially
     df_cleaned = df_cleaned.dropna(subset=required_range_cols)
     if df_cleaned.empty:
-        print(f"  No galaxies remaining after ensuring {required_range_cols} are not NaN post-coercion.")
+        logger.info(f"  No galaxies remaining after ensuring {required_range_cols} are not NaN post-coercion.")
         return df_cleaned
 
     count_before_range_checks = len(df_cleaned)
@@ -156,13 +159,14 @@ def clean_galaxy_catalog(glade_df, numeric_cols=['PGC', 'ra', 'dec', 'z'], cols_
         (df_cleaned['ra'] >= ra_min) & (df_cleaned['ra'] < ra_max) & # Note: ra < ra_max
         (df_cleaned['z'] > z_min) & (df_cleaned['z'] < z_max)       # Note: z > z_min
     ]
-    print(f"  {len(df_cleaned):,} clean galaxies kept after range checks (from {count_before_range_checks}).")
+    logger.info(f"  {len(df_cleaned):,} clean galaxies kept after range checks (from {count_before_range_checks}).")
     
     if not df_cleaned.empty:
-        print("  Sample of cleaned galaxy data (head):")
-        print(df_cleaned.head())
+        logger.info("  Sample of cleaned galaxy data (head):")
+        # Convert head to string to log it; avoids multi-line issues with some log formatters
+        logger.info("\n" + df_cleaned.head().to_string())
     else:
-        print("  No galaxies remaining after range checks.")
+        logger.info("  No galaxies remaining after range checks.")
     return df_cleaned
 
 def apply_specific_galaxy_corrections(hosts_df, event_name, corrections_dict=DEFAULT_GALAXY_CORRECTIONS):
@@ -182,7 +186,7 @@ def apply_specific_galaxy_corrections(hosts_df, event_name, corrections_dict=DEF
         return hosts_df
 
     if 'PGC' not in hosts_df.columns or 'z' not in hosts_df.columns:
-        print("⚠️ 'PGC' or 'z' column missing in hosts_df. Cannot apply specific galaxy corrections.")
+        logger.warning("⚠️ 'PGC' or 'z' column missing in hosts_df. Cannot apply specific galaxy corrections.")
         return hosts_df
         
     df_corrected = hosts_df.copy()
@@ -200,29 +204,34 @@ def apply_specific_galaxy_corrections(hosts_df, event_name, corrections_dict=DEF
 
     if is_galaxy_present:
         current_z = df_corrected.loc[galaxy_mask, 'z'].iloc[0]
-        print(f"\nFound galaxy PGC {pgc_id_to_correct} in candidate hosts for {event_name}.")
-        print(f"  Its current redshift from GLADE is: {current_z:.5f}")
+        logger.info(f"\nFound galaxy PGC {pgc_id_to_correct} in candidate hosts for {event_name}.")
+        logger.info(f"  Its current redshift from GLADE is: {current_z:.5f}")
         # Apply correction if significantly different or if a policy is to always update
         # Using a small tolerance for floating point comparison
         if abs(current_z - literature_z) > 1e-6: 
-            print(f"  Correcting its redshift to the literature value: {literature_z:.5f}")
+            logger.info(f"  Correcting its redshift to the literature value: {literature_z:.5f}")
             df_corrected.loc[galaxy_mask, 'z'] = literature_z
         else:
-            print(f"  Its current redshift {current_z:.5f} is close enough to the literature value. No correction applied.")
+            logger.info(f"  Its current redshift {current_z:.5f} is close enough to the literature value. No correction applied.")
     else:
-        print(f"\nNote: Galaxy PGC {pgc_id_to_correct} (for {event_name} correction) not found in candidate hosts.")
+        logger.info(f"\nNote: Galaxy PGC {pgc_id_to_correct} (for {event_name} correction) not found in candidate hosts.")
     return df_corrected
 
 if __name__ == '__main__':
-    # Example Usage and Test for this module
-    print("--- Testing galaxy_catalog_handler.py ---")
+    # Configure basic logging for standalone testing
+    logging.basicConfig(
+        level=logging.DEBUG, 
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[logging.StreamHandler(sys.stdout)]
+    )
+    logger.info("--- Testing galaxy_catalog_handler.py ---")
 
     # 1. Test download and load for GLADE+
     test_glade_plus_file = "GLADE+_test.txt"
     if os.path.exists(test_glade_plus_file):
         os.remove(test_glade_plus_file)
 
-    print("\n--- Testing GLADE+ ---   ")
+    logger.info("\n--- Testing GLADE+ ---   ")
     raw_galaxies_plus = download_and_load_galaxy_catalog(catalog_type='glade+')
     # To avoid downloading the large GLADE+ file during routine tests, we can mock or use a small subset.
     # For this example, we'll proceed assuming it might download or use an existing small test file.
@@ -233,7 +242,7 @@ if __name__ == '__main__':
     # It is now: download_and_load_galaxy_catalog(catalog_type='glade+') which uses GLADE_PLUS_FILE by default.
 
     if not raw_galaxies_plus.empty:
-        print(f"Successfully loaded {len(raw_galaxies_plus)} raw galaxies from GLADE+.")
+        logger.info(f"Successfully loaded {len(raw_galaxies_plus)} raw galaxies from GLADE+.")
         test_range_filters_plus = DEFAULT_RANGE_CHECKS.copy()
         test_range_filters_plus['z_max'] = 0.8 # Example z_max for GLADE+
         cleaned_galaxies_plus = clean_galaxy_catalog(
@@ -241,18 +250,18 @@ if __name__ == '__main__':
             range_filters=test_range_filters_plus
         )
         if not cleaned_galaxies_plus.empty:
-            print(f"Successfully cleaned GLADE+, {len(cleaned_galaxies_plus)} galaxies remaining.")
+            logger.info(f"Successfully cleaned GLADE+, {len(cleaned_galaxies_plus)} galaxies remaining.")
         else:
-            print("GLADE+ cleaning resulted in an empty DataFrame.")
+            logger.warning("GLADE+ cleaning resulted in an empty DataFrame.")
     else:
-        print("Failed to load raw galaxies from GLADE+. Check connection or file.")
+        logger.error("Failed to load raw galaxies from GLADE+. Check connection or file.")
 
     # 2. Test download and load for GLADE 2.4
     test_glade24_file = "GLADE_2.4_test.txt"
     if os.path.exists(test_glade24_file):
         os.remove(test_glade24_file)
 
-    print("\n--- Testing GLADE 2.4 ---    ")
+    logger.info("\n--- Testing GLADE 2.4 ---    ")
     # To make the test use the temporary file, we'd need to pass filename to download_and_load_galaxy_catalog
     # The function signature was changed. We need to decide how to handle test file names.
     # For now, the test will attempt to use the *actual* default filenames (GLADE_PLUS_FILE, GLADE24_FILE)
@@ -264,7 +273,7 @@ if __name__ == '__main__':
     raw_galaxies_24 = download_and_load_galaxy_catalog(catalog_type='glade24')
 
     if not raw_galaxies_24.empty:
-        print(f"Successfully loaded {len(raw_galaxies_24)} raw galaxies from GLADE 2.4.")
+        logger.info(f"Successfully loaded {len(raw_galaxies_24)} raw galaxies from GLADE 2.4.")
 
         test_range_filters_24 = DEFAULT_RANGE_CHECKS.copy()
         test_range_filters_24['z_max'] = 0.5
@@ -275,7 +284,7 @@ if __name__ == '__main__':
         )
 
         if not cleaned_galaxies_24.empty:
-            print(f"Successfully cleaned GLADE 2.4, {len(cleaned_galaxies_24)} galaxies remaining.")
+            logger.info(f"Successfully cleaned GLADE 2.4, {len(cleaned_galaxies_24)} galaxies remaining.")
 
             # 3. Test specific galaxy corrections (using GLADE 2.4 cleaned data as example)
             ngc4993_like_data = {
@@ -286,34 +295,34 @@ if __name__ == '__main__':
             }
             dummy_hosts = pd.DataFrame(ngc4993_like_data)
 
-            print("\nTesting galaxy corrections on dummy data...")
+            logger.info("\nTesting galaxy corrections on dummy data...")
             corrected_hosts = apply_specific_galaxy_corrections(dummy_hosts, "GW170817")
 
             if not corrected_hosts.empty:
-                print("Corrections applied (or checked). Resulting dummy data:")
-                print(corrected_hosts)
+                logger.info("Corrections applied (or checked). Resulting dummy data:")
+                logger.info("\n" + corrected_hosts.to_string())
                 corrected_z_val = corrected_hosts[corrected_hosts['PGC'] == DEFAULT_GALAXY_CORRECTIONS["GW170817"]["PGC_ID"]]['z'].iloc[0]
                 expected_z_val = DEFAULT_GALAXY_CORRECTIONS["GW170817"]["LITERATURE_Z"]
                 if abs(corrected_z_val - expected_z_val) < 1e-6:
-                    print(f"  PGC {DEFAULT_GALAXY_CORRECTIONS['GW170817']['PGC_ID']} redshift successfully corrected to {expected_z_val:.6f}")
+                    logger.info(f"  PGC {DEFAULT_GALAXY_CORRECTIONS['GW170817']['PGC_ID']} redshift successfully corrected to {expected_z_val:.6f}")
                 else:
-                    print(f"  PGC {DEFAULT_GALAXY_CORRECTIONS['GW170817']['PGC_ID']} redshift is {corrected_z_val:.6f}, expected {expected_z_val:.6f}. Check logic.")
+                    logger.error(f"  PGC {DEFAULT_GALAXY_CORRECTIONS['GW170817']['PGC_ID']} redshift is {corrected_z_val:.6f}, expected {expected_z_val:.6f}. Check logic.")
 
-            print("\nTesting corrections for an event not in DEFAULT_GALAXY_CORRECTIONS ('FAKE_EVENT')...")
+            logger.info("\nTesting corrections for an event not in DEFAULT_GALAXY_CORRECTIONS ('FAKE_EVENT')...")
             uncorrected_hosts = apply_specific_galaxy_corrections(dummy_hosts, "FAKE_EVENT")
             if uncorrected_hosts.equals(dummy_hosts):
-                print("  Correctly returned original dataframe as FAKE_EVENT not in corrections dict.")
+                logger.info("  Correctly returned original dataframe as FAKE_EVENT not in corrections dict.")
         else:
-            print("GLADE 2.4 cleaning resulted in an empty DataFrame. Further tests might be affected.")
+            logger.warning("GLADE 2.4 cleaning resulted in an empty DataFrame. Further tests might be affected.")
     else:
-        print("Failed to load raw galaxies from GLADE 2.4. Check connection or file.")
+        logger.error("Failed to load raw galaxies from GLADE 2.4. Check connection or file.")
 
     # Clean up test files - this part is now problematic as we are not using specific test file names in the load function.
     # if os.path.exists(test_glade_plus_file):
     #     os.remove(test_glade_plus_file)
-    #     print(f"Removed test GLADE+ file: {test_glade_plus_file}")
+    #     logger.info(f"Removed test GLADE+ file: {test_glade_plus_file}")
     # if os.path.exists(test_glade24_file):
     #     os.remove(test_glade24_file)
-    #     print(f"Removed test GLADE 2.4 file: {test_glade24_file}")
+    #     logger.info(f"Removed test GLADE 2.4 file: {test_glade24_file}")
 
-    print("\n--- Finished testing galaxy_catalog_handler.py ---") 
+    logger.info("\n--- Finished testing galaxy_catalog_handler.py ---") 

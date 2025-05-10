@@ -4,6 +4,9 @@ from scipy.stats import norm
 from astropy.cosmology import FlatLambdaCDM
 from astropy import units as u
 import emcee
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Default Cosmological Parameters for Likelihood
 DEFAULT_SIGMA_V_PEC = 250.0  # km/s, peculiar velocity uncertainty
@@ -61,22 +64,22 @@ def get_log_likelihood_h0(
 
     def log_likelihood(theta):
         H0 = theta[0]
-        print(f"DEBUG MCMC: log_likelihood called with H0 = {H0}")
+        logger.debug(f"log_likelihood called with H0 = {H0}")
 
         if not (h0_min <= H0 <= h0_max):
-            print(f"DEBUG MCMC: H0 = {H0} is outside prior range ({h0_min}, {h0_max}). Returning -inf.")
+            logger.debug(f"H0 = {H0} is outside prior range ({h0_min}, {h0_max}). Returning -inf.")
             return -np.inf
 
         # Calculate model luminosity distances for all host galaxies at this H0
         # model_d will be an array of shape (N_hosts,)
         try: 
             model_d_for_hosts = lum_dist_model(z_values, H0)
-            print(f"DEBUG MCMC: model_d_for_hosts (first 5 if available): {model_d_for_hosts[:min(5, len(model_d_for_hosts))]}") 
+            logger.debug(f"model_d_for_hosts (first 5 if available): {model_d_for_hosts[:min(5, len(model_d_for_hosts))]}") 
             if np.any(~np.isfinite(model_d_for_hosts)): 
-                print(f"DEBUG MCMC: Non-finite values in model_d_for_hosts for H0 = {H0}. Example: {model_d_for_hosts[~np.isfinite(model_d_for_hosts)][:min(5, len(model_d_for_hosts[~np.isfinite(model_d_for_hosts)]))]}") 
+                logger.debug(f"Non-finite values in model_d_for_hosts for H0 = {H0}. Example: {model_d_for_hosts[~np.isfinite(model_d_for_hosts)][:min(5, len(model_d_for_hosts[~np.isfinite(model_d_for_hosts)]))]}") 
                 return -np.inf 
         except Exception as e: 
-            print(f"DEBUG MCMC: EXCEPTION in lum_dist_model for H0 = {H0}: {e}") 
+            logger.debug(f"EXCEPTION in lum_dist_model for H0 = {H0}: {e}") 
             return -np.inf 
         
         # Calculate sigma_d for each host based on its model_d
@@ -84,9 +87,9 @@ def get_log_likelihood_h0(
         sigma_d_val_for_hosts = (model_d_for_hosts / c_val) * sigma_v
         # Prevent sigma_d from being too small or zero to avoid numerical issues
         sigma_d_val_for_hosts = np.maximum(sigma_d_val_for_hosts, 1e-9) 
-        print(f"DEBUG MCMC: sigma_d_val_for_hosts (first 5 if available): {sigma_d_val_for_hosts[:min(5, len(sigma_d_val_for_hosts))]}") 
+        logger.debug(f"sigma_d_val_for_hosts (first 5 if available): {sigma_d_val_for_hosts[:min(5, len(sigma_d_val_for_hosts))]}") 
         if np.any(~np.isfinite(sigma_d_val_for_hosts)): 
-            print(f"DEBUG MCMC: Non-finite values in sigma_d_val_for_hosts for H0 = {H0}.") 
+            logger.debug(f"Non-finite values in sigma_d_val_for_hosts for H0 = {H0}.") 
             return -np.inf
 
         # --- Memory-Efficient Likelihood Calculation --- 
@@ -112,12 +115,12 @@ def get_log_likelihood_h0(
                     scale=current_sigma_d   # Scalar scale
                 )
             except Exception as e:
-                print(f"DEBUG MCMC: EXCEPTION in norm.logpdf for H0 = {H0}, galaxy_idx = {i}: {e}")
+                logger.debug(f"EXCEPTION in norm.logpdf for H0 = {H0}, galaxy_idx = {i}: {e}")
                 log_pdf_for_one_galaxy = np.full(len(dL_gw_samples), -np.inf) # Penalize this galaxy if error
 
             if np.any(~np.isfinite(log_pdf_for_one_galaxy)):
                 # This might happen if current_sigma_d is zero or nan, or current_model_d is problematic
-                # print(f"DEBUG MCMC: Non-finite log_pdf_for_one_galaxy for H0={H0}, galaxy_idx={i}. model_d={current_model_d}, sigma_d={current_sigma_d}")
+                # logger.debug(f"Non-finite log_pdf_for_one_galaxy for H0={H0}, galaxy_idx={i}. model_d={current_model_d}, sigma_d={current_sigma_d}")
                 # Set to a very low value, or handle as error for the galaxy
                 log_P_data_H0_zi_terms[i] = -np.inf # Or some very large negative number if all samples are non-finite for this galaxy
             else:
@@ -127,22 +130,22 @@ def get_log_likelihood_h0(
             
             # Optional: progress print if N_hosts is very large and this loop takes time
             # if i > 0 and i % 10000 == 0 and len(z_values) > 20000: # Print every 10000 galaxies if many
-            #    print(f"DEBUG MCMC: H0={H0:.2f}, processed likelihood for galaxy {i}/{len(z_values)}")
+            #    logger.debug(f"H0={H0:.2f}, processed likelihood for galaxy {i}/{len(z_values)}")
         
         # log_sum_over_gw_samples is now log_P_data_H0_zi_terms, which is shape (N_hosts,)
         log_sum_over_gw_samples = log_P_data_H0_zi_terms
-        print(f"DEBUG MCMC: log_sum_over_gw_samples (iterative per galaxy) shape: {log_sum_over_gw_samples.shape}, any non-finite: {np.any(~np.isfinite(log_sum_over_gw_samples))}")
+        logger.debug(f"log_sum_over_gw_samples (iterative per galaxy) shape: {log_sum_over_gw_samples.shape}, any non-finite: {np.any(~np.isfinite(log_sum_over_gw_samples))}")
 
         # Marginalize over galaxies (sum probabilities for a given H0):
         # log P(data | H0) = log [ (1/N_hosts) * sum_i P(data | H0, z_i) ]
         # This is equivalent to logsumexp(log P(data | H0, z_i)) - log(N_hosts)
         # This assumes a uniform prior over the candidate host galaxies.
         total_log_likelihood = np.logaddexp.reduce(log_sum_over_gw_samples) - np.log(len(z_values))
-        print(f"DEBUG MCMC: total_log_likelihood = {total_log_likelihood}")
+        logger.debug(f"total_log_likelihood = {total_log_likelihood}")
         
         if not np.isfinite(total_log_likelihood):
             # Helps catch numerical issues (e.g., if all log_pdf_values were -inf)
-            print(f"DEBUG MCMC: total_log_likelihood is not finite ({total_log_likelihood}) for H0 = {H0}. Returning -inf.")
+            logger.debug(f"total_log_likelihood is not finite ({total_log_likelihood}) for H0 = {H0}. Returning -inf.")
             return -np.inf 
             
         return total_log_likelihood
@@ -173,7 +176,7 @@ def run_mcmc_h0(
     Returns:
         emcee.EnsembleSampler: The MCMC sampler object after running, or None on failure.
     """
-    print(f"\\nRunning MCMC for H0 on event {event_name} ({n_steps} steps, {n_walkers} walkers)...")
+    logger.info(f"Running MCMC for H0 on event {event_name} ({n_steps} steps, {n_walkers} walkers)...")
     # Initial positions for walkers, centered around a plausible H0
     walkers0 = initial_h0_mean + initial_h0_std * np.random.randn(n_walkers, n_dim)
 
@@ -185,14 +188,14 @@ def run_mcmc_h0(
     
     try:
         sampler.run_mcmc(walkers0, n_steps, progress=True)
-        print(f"MCMC run completed for {event_name}.")
+        logger.info(f"MCMC run completed for {event_name}.")
         return sampler
     except ValueError as ve:
-        print(f"❌ ValueError during MCMC for {event_name}: {ve}")
-        print("  This can happen if the likelihood consistently returns -inf, check priors or input data.")
+        logger.error(f"❌ ValueError during MCMC for {event_name}: {ve}")
+        logger.error("  This can happen if the likelihood consistently returns -inf, check priors or input data.")
         return None
     except Exception as e:
-        print(f"❌ An unexpected error occurred during MCMC for {event_name}: {e}")
+        logger.exception(f"❌ An unexpected error occurred during MCMC for {event_name}: {e}")
         return None
         
 def process_mcmc_samples(sampler, event_name, burnin=DEFAULT_MCMC_BURNIN, thin_by=DEFAULT_MCMC_THIN_BY, n_dim=DEFAULT_MCMC_N_DIM):
@@ -210,40 +213,46 @@ def process_mcmc_samples(sampler, event_name, burnin=DEFAULT_MCMC_BURNIN, thin_b
         np.array: Flattened array of H0 samples after burn-in and thinning, or None if processing fails.
     """
     if sampler is None:
-        print(f"⚠️ Sampler object is None for {event_name}. Cannot process MCMC samples.")
+        logger.warning(f"⚠️ Sampler object is None for {event_name}. Cannot process MCMC samples.")
         return None
 
-    print(f"Processing MCMC samples for {event_name} (burn-in: {burnin}, thin: {thin_by})...")
+    logger.info(f"Processing MCMC samples for {event_name} (burn-in: {burnin}, thin: {thin_by})...")
     try:
         # get_chain shape: (n_steps, n_walkers, n_dim)
         # flat=True gives shape: (n_steps_after_discard_and_thin * n_walkers, n_dim)
         flat_samples = sampler.get_chain(discard=burnin, thin=thin_by, flat=True)
         
         if flat_samples.shape[0] == 0:
-            print(f"⚠️ MCMC for {event_name} resulted in NO valid samples after burn-in ({burnin}) and thinning ({thin_by}).")
-            print(f"  Original chain length before discard: {sampler.get_chain().shape[0]}")
+            logger.warning(f"⚠️ MCMC for {event_name} resulted in NO valid samples after burn-in ({burnin}) and thinning ({thin_by}).")
+            logger.warning(f"  Original chain length before discard: {sampler.get_chain().shape[0]}")
             return None
 
         if n_dim == 1 and flat_samples.ndim == 2 and flat_samples.shape[1] == 1:
              processed_samples = flat_samples[:,0] # Extract the single parameter (H0)
         elif n_dim > 1 and flat_samples.ndim == 2 and flat_samples.shape[1] == n_dim:
-            print(f"  Note: MCMC had {n_dim} dimensions. Returning all dimensions after processing.")
+            logger.info(f"  Note: MCMC had {n_dim} dimensions. Returning all dimensions after processing.")
             processed_samples = flat_samples # Keep as is if multi-dimensional and correctly shaped
         elif flat_samples.ndim == 1 and n_dim ==1: # Already flat and 1D
             processed_samples = flat_samples
         else:
-            print(f"⚠️ Unexpected shape for flat_samples: {flat_samples.shape}. Expected ({'*', n_dim}). Cannot safely extract H0.")
+            logger.warning(f"⚠️ Unexpected shape for flat_samples: {flat_samples.shape}. Expected ({'*', n_dim}). Cannot safely extract H0.")
             return None
 
-        print(f"  Successfully processed MCMC samples for {event_name}. Number of samples: {len(processed_samples)}.")
+        logger.info(f"  Successfully processed MCMC samples for {event_name}. Number of samples: {len(processed_samples)}.")
         return processed_samples
         
     except Exception as e:
-        print(f"❌ Error processing MCMC chain for {event_name}: {e}")
+        logger.exception(f"❌ Error processing MCMC chain for {event_name}: {e}")
         return None
 
 if __name__ == '__main__':
-    print("--- Testing h0_mcmc_analyzer.py ---")
+    # Configure basic logging for standalone testing of this module
+    logging.basicConfig(
+        level=logging.DEBUG, # Show debug messages for testing this module
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[logging.StreamHandler(sys.stdout)]
+    )
+    logger.info("--- Testing h0_mcmc_analyzer.py ---")
     
     # Mock data for testing likelihood and MCMC
     mock_event = "GW_MOCK_H0_TEST"
@@ -251,32 +260,32 @@ if __name__ == '__main__':
     mock_host_zs = np.array([0.1, 0.12, 0.09]) # Redshifts of a few mock galaxies
 
     # 1. Test get_log_likelihood_h0
-    print("\nTest 1: Getting log likelihood function...")
+    logger.info("\nTest 1: Getting log likelihood function...")
     try:
         log_like_func = get_log_likelihood_h0(mock_dL_gw, mock_host_zs)
         # Test the likelihood function with some H0 values
         h0_test_values = [60.0, 70.0, 80.0]
-        print(f"  Log likelihood values for H0={h0_test_values}:")
+        logger.info(f"  Log likelihood values for H0={h0_test_values}:")
         for h0_val in h0_test_values:
             ll = log_like_func([h0_val])
-            print(f"    H0 = {h0_val:.1f}: logL = {ll:.2f}")
+            logger.info(f"    H0 = {h0_val:.1f}: logL = {ll:.2f}")
             assert np.isfinite(ll), f"LogL not finite for H0={h0_val}"
-        print("  Log likelihood function seems operational.")
+        logger.info("  Log likelihood function seems operational.")
 
         # Test prior boundaries
         ll_low = log_like_func([DEFAULT_H0_PRIOR_MIN - 1])
         assert ll_low == -np.inf, "Prior min boundary failed"
         ll_high = log_like_func([DEFAULT_H0_PRIOR_MAX + 1])
         assert ll_high == -np.inf, "Prior max boundary failed"
-        print(f"  Prior boundaries (H0_min={DEFAULT_H0_PRIOR_MIN}, H0_max={DEFAULT_H0_PRIOR_MAX}) correctly applied.")
+        logger.info(f"  Prior boundaries (H0_min={DEFAULT_H0_PRIOR_MIN}, H0_max={DEFAULT_H0_PRIOR_MAX}) correctly applied.")
 
     except ValueError as ve:
-        print(f"  Error in Test 1 (get_log_likelihood_h0): {ve}")
+        logger.error(f"  Error in Test 1 (get_log_likelihood_h0): {ve}")
     except Exception as e:
-        print(f"  Unexpected error in Test 1 (get_log_likelihood_h0): {e}")
+        logger.exception(f"  Unexpected error in Test 1 (get_log_likelihood_h0): {e}")
 
     # 2. Test run_mcmc_h0 and process_mcmc_samples
-    print("\nTest 2: Running MCMC and processing samples...")
+    logger.info("\nTest 2: Running MCMC and processing samples...")
     # Reduce steps for faster testing
     test_mcmc_steps = 200 
     test_mcmc_burnin = 50
@@ -298,29 +307,29 @@ if __name__ == '__main__':
                 thin_by=2 # Small thin factor for test
             )
             if h0_samples is not None and len(h0_samples) > 0:
-                print(f"  Successfully ran MCMC and processed samples for {mock_event}.")
-                print(f"  Number of H0 samples obtained: {len(h0_samples)}")
-                print(f"  H0 mean: {np.mean(h0_samples):.2f}, H0 std: {np.std(h0_samples):.2f}")
+                logger.info(f"  Successfully ran MCMC and processed samples for {mock_event}.")
+                logger.info(f"  Number of H0 samples obtained: {len(h0_samples)}")
+                logger.info(f"  H0 mean: {np.mean(h0_samples):.2f}, H0 std: {np.std(h0_samples):.2f}")
                 # Expect H0 mean to be somewhat related to initial mean if likelihood is reasonable
                 # assert DEFAULT_MCMC_INITIAL_H0_MEAN - 3*DEFAULT_MCMC_INITIAL_H0_STD < np.mean(h0_samples) < DEFAULT_MCMC_INITIAL_H0_MEAN + 3*DEFAULT_MCMC_INITIAL_H0_STD
             elif h0_samples is not None and len(h0_samples) == 0:
-                print("  MCMC processing resulted in zero samples. Check burn-in/thinning or chain length.")
+                logger.warning("  MCMC processing resulted in zero samples. Check burn-in/thinning or chain length.")
             else:
-                print("  MCMC processing failed to return valid samples.")
+                logger.error("  MCMC processing failed to return valid samples.")
         else:
-            print("  MCMC run failed or returned no sampler. Cannot test processing.")
+            logger.error("  MCMC run failed or returned no sampler. Cannot test processing.")
     else:
-        print("  Log likelihood function not available. Skipping MCMC run and processing tests.")
+        logger.error("  Log likelihood function not available. Skipping MCMC run and processing tests.")
 
     # Test with problematic inputs for get_log_likelihood_h0
-    print("\nTest 3: Edge cases for get_log_likelihood_h0")
+    logger.info("\nTest 3: Edge cases for get_log_likelihood_h0")
     try:
         get_log_likelihood_h0(None, mock_host_zs)
     except ValueError as e:
-        print(f"  Correctly caught error for None dL samples: {e}")
+        logger.info(f"  Correctly caught error for None dL samples: {e}")
     try:
         get_log_likelihood_h0(mock_dL_gw, [])
     except ValueError as e:
-        print(f"  Correctly caught error for empty host_zs: {e}")
+        logger.info(f"  Correctly caught error for empty host_zs: {e}")
 
-    print("\n--- Finished testing h0_mcmc_analyzer.py ---") 
+    logger.info("\n--- Finished testing h0_mcmc_analyzer.py ---") 

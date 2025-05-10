@@ -4,6 +4,10 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D # Required for projection='3d', do not remove
 from astropy.cosmology import FlatLambdaCDM
 from astropy import units as u
+import logging
+import os # Added os module
+
+logger = logging.getLogger(__name__)
 
 def plot_3d_localization_with_galaxies(
     event_name: str,
@@ -14,7 +18,8 @@ def plot_3d_localization_with_galaxies(
     H0_for_galaxy_dist: float,
     omega_m_for_galaxy_dist: float,
     output_filename_template: str = "3d_localization_{event_name}.pdf",
-    num_gw_samples_to_plot: int = 1000
+    num_gw_samples_to_plot: int = 1000,
+    output_dir: str = "output"  # Added output_dir argument with default
 ):
     """
     Generates a 3D scatter plot visualizing GW event localization and candidate host galaxies.
@@ -32,17 +37,21 @@ def plot_3d_localization_with_galaxies(
         output_filename_template (str, optional): Template for the output plot filename.
                                                   Defaults to "3d_localization_{event_name}.pdf".
         num_gw_samples_to_plot (int, optional): Number of GW samples to plot. Defaults to 1000.
+        output_dir (str, optional): Directory to save the output plot. Defaults to "output".
     """
-    print(f"\nGenerating 3D localization plot for {event_name}...")
+    logger.info(f"\nGenerating 3D localization plot for {event_name} (will save to '{output_dir}')...")
+
+    # Ensure output directory exists
+    os.makedirs(output_dir, exist_ok=True)
 
     plot_gw_data = True
     if ra_gw_samples is None or dec_gw_samples is None or dL_gw_samples is None or \
        len(ra_gw_samples) == 0 or len(dec_gw_samples) == 0 or len(dL_gw_samples) == 0:
-        print(f"⚠️ GW samples (RA, Dec, or dL) are missing or empty for {event_name}. GW data will not be plotted.")
+        logger.warning(f"⚠️ GW samples (RA, Dec, or dL) are missing or empty for {event_name}. GW data will not be plotted.")
         plot_gw_data = False
     elif not (len(ra_gw_samples) == len(dec_gw_samples) == len(dL_gw_samples)):
         min_len = min(len(ra_gw_samples), len(dec_gw_samples), len(dL_gw_samples))
-        print(f"⚠️ Mismatch in lengths of GW sample arrays for {event_name} ({len(ra_gw_samples)}, {len(dec_gw_samples)}, {len(dL_gw_samples)}). Truncating to shortest length: {min_len}.")
+        logger.warning(f"⚠️ Mismatch in lengths of GW sample arrays for {event_name} ({len(ra_gw_samples)}, {len(dec_gw_samples)}, {len(dL_gw_samples)}). Truncating to shortest length: {min_len}.")
         ra_gw_samples = ra_gw_samples[:min_len]
         dec_gw_samples = dec_gw_samples[:min_len]
         dL_gw_samples = dL_gw_samples[:min_len]
@@ -69,7 +78,7 @@ def plot_3d_localization_with_galaxies(
         x_gw_plot = dist_gw * np.cos(dec_rad_gw) * np.cos(ra_rad_gw)
         y_gw_plot = dist_gw * np.cos(dec_rad_gw) * np.sin(ra_rad_gw)
         z_gw_plot = dist_gw * np.sin(dec_rad_gw)
-        print(f"Prepared {num_plotted_gw_samples} GW samples for 3D plot.")
+        logger.info(f"Prepared {num_plotted_gw_samples} GW samples for 3D plot.")
 
     # 2. Prepare Galaxy Coordinates for Plotting
     x_gal_plot, y_gal_plot, z_gal_plot = [], [], []
@@ -88,7 +97,7 @@ def plot_3d_localization_with_galaxies(
                 gal_dec_deg = float(galaxy_row['dec'])
 
                 if gal_z < 0: # Redshift should be non-negative for dL calculation
-                    print(f"ℹ️ Skipping galaxy with negative redshift z={gal_z:.3f} (PGC: {galaxy_row.get('PGC', 'N/A')}).")
+                    logger.info(f"ℹ️ Skipping galaxy with negative redshift z={gal_z:.3f} (PGC: {galaxy_row.get('PGC', 'N/A')}).")
                     continue
                 
                 # Luminosity distance calculation
@@ -108,23 +117,23 @@ def plot_3d_localization_with_galaxies(
                 # else:
                 #     galaxy_pgc_labels.append(None)
             except ValueError as ve:
-                print(f"⚠️ Skipping galaxy due to invalid data (e.g., non-numeric RA/Dec/z): {ve}. Row: PGC {galaxy_row.get('PGC', 'N/A')}, data {galaxy_row.to_dict()}")
+                logger.warning(f"⚠️ Skipping galaxy due to invalid data (e.g., non-numeric RA/Dec/z): {ve}. Row: PGC {galaxy_row.get('PGC', 'N/A')}, data {galaxy_row.to_dict()}")
             except Exception as e: # Catch other astropy or calculation errors
-                print(f"⚠️ Error processing galaxy PGC {galaxy_row.get('PGC', 'N/A')}: {e}")
+                logger.warning(f"⚠️ Error processing galaxy PGC {galaxy_row.get('PGC', 'N/A')}: {e}")
         
         if processed_galaxies > 0:
-            print(f"Prepared {processed_galaxies} candidate host galaxies for 3D plot.")
+            logger.info(f"Prepared {processed_galaxies} candidate host galaxies for 3D plot.")
         else:
-            print("ℹ️ No valid candidate host galaxies processed for 3D plot.")
+            logger.info("ℹ️ No valid candidate host galaxies processed for 3D plot.")
             
     elif candidate_hosts_df.empty:
-        print(f"ℹ️ Candidate hosts DataFrame is empty for {event_name}. No galaxies will be plotted.")
+        logger.info(f"ℹ️ Candidate hosts DataFrame is empty for {event_name}. No galaxies will be plotted.")
     else: # DataFrame not empty, but missing required columns
-        print(f"⚠️ Candidate hosts DataFrame for {event_name} is missing 'ra', 'dec', or 'z' columns. Galaxies will not be plotted.")
+        logger.warning(f"⚠️ Candidate hosts DataFrame for {event_name} is missing 'ra', 'dec', or 'z' columns. Galaxies will not be plotted.")
 
     # 3. Create the 3D Plot
     if not plot_gw_data and not x_gal_plot:
-        print(f"⚠️ No data available to plot for {event_name} (neither GW samples nor galaxies). Skipping 3D plot generation.")
+        logger.warning(f"⚠️ No data available to plot for {event_name} (neither GW samples nor galaxies). Skipping 3D plot generation.")
         return
 
     fig = plt.figure(figsize=(12, 10))
@@ -178,12 +187,13 @@ def plot_3d_localization_with_galaxies(
 
     ax.view_init(elev=25., azim=45) # Adjust viewing angle (elevation, azimuth) as preferred
 
-    filename_out = output_filename_template.format(event_name=event_name)
+    base_filename = output_filename_template.format(event_name=event_name)
+    full_output_path = os.path.join(output_dir, base_filename)
     try:
-        plt.savefig(filename_out, bbox_inches='tight', dpi=150)
-        print(f"✅ 3D localization plot saved to {filename_out}")
+        plt.savefig(full_output_path, bbox_inches='tight', dpi=150)
+        logger.info(f"✅ 3D localization plot saved to {full_output_path}")
     except Exception as e:
-        print(f"❌ Error saving 3D localization plot '{filename_out}': {e}")
+        logger.error(f"❌ Error saving 3D localization plot '{full_output_path}': {e}")
     
     plt.show(block=False)
     plt.pause(1) # Allow plot to render in non-blocking mode

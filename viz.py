@@ -19,6 +19,21 @@ from astropy import units as u # For select_candidate_hosts
 from astropy.cosmology import FlatLambdaCDM # For H0 likelihood
 from scipy.stats import norm # For H0 likelihood
 import emcee # For MCMC
+import logging # Added logging
+import argparse # Added argparse
+
+# Get a logger for this module (configuration will be done in main)
+logger = logging.getLogger(__name__)
+
+OUTPUT_DIR = "output" # Define the output directory
+
+# Configure basic logging as early as possible, ideally before other module imports
+# if those modules also use logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,  # Default level, change to logging.DEBUG for MCMC details etc.
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)] # Ensure logs go to stdout
+)
 
 # Import from our new module
 from gw_data_fetcher import fetch_candidate_data, configure_astropy_cache, DEFAULT_CACHE_DIR_NAME
@@ -59,7 +74,7 @@ from plot_utils import plot_3d_localization_with_galaxies
 # -------------------------------------------------------------------
 # Configuration specific to this visualization script
 # -------------------------------------------------------------------
-DEFAULT_EVENT_NAME_VIZ = "GW170817"
+DEFAULT_EVENT_NAME_VIZ = "GW190814"
 VIZ_CATALOG_TYPE = 'glade+' # Specify catalog type: 'glade+' or 'glade24'
 
 # HEALPix Sky Map parameters for this script
@@ -95,7 +110,7 @@ def plot_redshift_distribution(
     Includes an optional vertical line for a redshift cutoff.
     """
     if galaxies_df.empty or 'z' not in galaxies_df.columns:
-        print(f"⚠️ Galaxies DataFrame is empty or 'z' column is missing. Cannot plot redshift distribution for '{plot_suffix_label}'.")
+        logger.warning(f"⚠️ Galaxies DataFrame is empty or 'z' column is missing. Cannot plot redshift distribution for '{plot_suffix_label}'.")
         return
 
     plt.figure(figsize=(10, 6))
@@ -116,11 +131,13 @@ def plot_redshift_distribution(
         safe_suffix = "".join(c if c.isalnum() else "_" for c in plot_suffix_label).lower()
         output_filename = f"redshift_dist_{event_name}_{safe_suffix}.pdf"
     
+    full_output_path = os.path.join(OUTPUT_DIR, output_filename)
+
     try:
-        plt.savefig(output_filename)
-        print(f"Redshift distribution plot saved to {output_filename}")
+        plt.savefig(full_output_path)
+        logger.info(f"Redshift distribution plot saved to {full_output_path}")
     except Exception as e:
-        print(f"❌ Error saving redshift distribution plot '{output_filename}': {e}")
+        logger.error(f"❌ Error saving redshift distribution plot '{full_output_path}': {e}")
     plt.show(block=False)
     plt.pause(1) # Give time for plot to render if not blocking
 
@@ -135,12 +152,12 @@ def plot_basic_sky_probability_map(prob_map_gw, nside, event_name, output_filena
         output_filename (str, optional): Path to save the plot.
     """
     if prob_map_gw is None or prob_map_gw.size != hp.nside2npix(nside):
-        print("⚠️ Probability map is None or Nside mismatch. Cannot generate basic sky map.")
+        logger.warning("⚠️ Probability map is None or Nside mismatch. Cannot generate basic sky map.")
         return
     if prob_map_gw.sum() == 0:
-        print("⚠️ Probability map sum is zero. Plotting empty map.")
+        logger.warning("⚠️ Probability map sum is zero. Plotting empty map.")
 
-    print(f"\nGenerating basic sky probability map for {event_name} (Nside={nside})...")
+    logger.info(f"\nGenerating basic sky probability map for {event_name} (Nside={nside})...")
     plt.figure(figsize=(10, 7))
     cmap = plt.cm.viridis 
     cmap.set_under("w")
@@ -158,11 +175,12 @@ def plot_basic_sky_probability_map(prob_map_gw, nside, event_name, output_filena
     if output_filename is None:
         output_filename = f"skymap_basic_{event_name}_nside{nside}.pdf"
 
+    full_output_path = os.path.join(OUTPUT_DIR, output_filename)
     try:
-        plt.savefig(output_filename)
-        print(f"Sky map saved to {output_filename}")
+        plt.savefig(full_output_path)
+        logger.info(f"Sky map saved to {full_output_path}")
     except Exception as e:
-        print(f"❌ Error saving sky map: {e}")
+        logger.error(f"❌ Error saving sky map: {e}")
     plt.show(block=False)
     plt.pause(1)
 
@@ -187,7 +205,7 @@ def plot_skymap_with_galaxies(
     if sky_mask_boolean is not None and sky_mask_boolean.size == prob_map_gw.size:
         prob_map_display[~sky_mask_boolean] = hp.UNSEEN 
     else:
-        print("⚠️ sky_mask_boolean is invalid or None. Displaying full probability map.")
+        logger.warning("⚠️ sky_mask_boolean is invalid or None. Displaying full probability map.")
         # prob_map_display remains a copy of prob_map_gw
 
     title = (
@@ -257,23 +275,24 @@ def plot_skymap_with_galaxies(
 
     if output_filename is None: output_filename = f"skymap_galaxies_{event_name}_cr{int(cred_level_percent)}.pdf"
     
+    full_output_path = os.path.join(OUTPUT_DIR, output_filename)
     try:
-        plt.savefig(output_filename, bbox_inches='tight')
-        print(f"Sky map with galaxies saved to {output_filename}")
-    except Exception as e: print(f"❌ Error saving sky map with galaxies: {e}")
+        plt.savefig(full_output_path, bbox_inches='tight')
+        logger.info(f"Sky map with galaxies saved to {full_output_path}")
+    except Exception as e: logger.error(f"❌ Error saving sky map with galaxies: {e}")
     plt.show(block=False)
     plt.pause(1)
 
 def plot_mcmc_trace(sampler, event_name, burnin_steps, n_walkers_total, mcmc_n_dim_expected=1):
     """Plots the MCMC trace (walker paths) for H0."""
-    if sampler is None: print(f"⚠️ Sampler object is None for {event_name}. Cannot plot MCMC trace."); return
+    if sampler is None: logger.warning(f"⚠️ Sampler object is None for {event_name}. Cannot plot MCMC trace."); return
 
-    print(f"\nGenerating MCMC trace plot for {event_name}...")
+    logger.info(f"\nGenerating MCMC trace plot for {event_name}...")
     try: full_chain = sampler.get_chain() # Shape: (n_steps, n_walkers, n_dim)
-    except Exception as e: print(f"❌ Error getting chain from sampler for {event_name}: {e}"); return
+    except Exception as e: logger.error(f"❌ Error getting chain from sampler for {event_name}: {e}"); return
 
-    if full_chain.ndim < 3 or full_chain.shape[2] != mcmc_n_dim_expected: print(f"❌ Chain dimension mismatch. Expected {mcmc_n_dim_expected}, got {full_chain.shape}"); return
-    # if full_chain.shape[1] != n_walkers_total: print(f"⚠️ Walker number mismatch. Expected {n_walkers_total}, chain has {full_chain.shape[1]}. Plotting available walkers.")
+    if full_chain.ndim < 3 or full_chain.shape[2] != mcmc_n_dim_expected: logger.error(f"❌ Chain dimension mismatch. Expected {mcmc_n_dim_expected}, got {full_chain.shape}"); return
+    # if full_chain.shape[1] != n_walkers_total: logger.warning(f"⚠️ Walker number mismatch. Expected {n_walkers_total}, chain has {full_chain.shape[1]}. Plotting available walkers.")
 
     plt.figure(figsize=(12, 6))
     num_walkers_to_plot = min(full_chain.shape[1], 5) # Plot a subset of up to 5 walkers
@@ -304,22 +323,26 @@ def plot_mcmc_trace(sampler, event_name, burnin_steps, n_walkers_total, mcmc_n_d
     plt.tight_layout(rect=[0, 0, 0.85 if legend_is_external else 1, 1])
     
     output_filename = f"mcmc_trace_{event_name}.pdf"
-    try: plt.savefig(output_filename); print(f"MCMC trace plot saved to {output_filename}")
-    except Exception as e: print(f"❌ Error saving MCMC trace plot: {e}")
+    full_output_path = os.path.join(OUTPUT_DIR, output_filename)
+    try: plt.savefig(full_output_path); logger.info(f"MCMC trace plot saved to {full_output_path}")
+    except Exception as e: logger.error(f"❌ Error saving MCMC trace plot: {e}")
     plt.show(block=False); plt.pause(1)
 
 def save_and_plot_h0_posterior_viz(h0_samples, event_name, num_candidate_hosts=None):
     """Saves H0 samples and plots the posterior distribution (viz.py version)."""
-    if h0_samples is None or len(h0_samples) == 0: print(f"⚠️ No H0 samples provided for {event_name}. Cannot save or plot posterior."); return
+    if h0_samples is None or len(h0_samples) == 0: logger.warning(f"⚠️ No H0 samples provided for {event_name}. Cannot save or plot posterior."); return
 
-    output_samples_file = f"H0_samples_{event_name}_viz.npy"
-    output_plot_file = f"H0_posterior_{event_name}_viz.pdf"
+    base_filename_samples = f"H0_samples_{event_name}_viz.npy"
+    base_filename_plot = f"H0_posterior_{event_name}_viz.pdf"
 
-    np.save(output_samples_file, h0_samples)
-    print(f"MCMC H0 samples saved to {output_samples_file}")
+    full_output_path_samples = os.path.join(OUTPUT_DIR, base_filename_samples)
+    full_output_path_plot = os.path.join(OUTPUT_DIR, base_filename_plot)
+
+    np.save(full_output_path_samples, h0_samples)
+    logger.info(f"MCMC H0 samples saved to {full_output_path_samples}")
 
     q16, q50, q84 = np.percentile(h0_samples, [16, 50, 84]); err_minus = q50 - q16; err_plus = q84 - q50
-    print(f"\n{event_name} H0 (from viz) = {q50:.1f} +{err_plus:.1f} / -{err_minus:.1f} km s⁻¹ Mpc⁻¹ (68% C.I.)")
+    logger.info(f"\n{event_name} H0 (from viz) = {q50:.1f} +{err_plus:.1f} / -{err_minus:.1f} km s⁻¹ Mpc⁻¹ (68% C.I.)")
 
     plt.figure(figsize=(8, 6)); plt.hist(h0_samples, bins=50, density=True, histtype="stepfilled", alpha=0.6, label="Posterior Samples")
     plt.axvline(q50, color='k', ls='--', label=f'Median: {q50:.1f} km s⁻¹ Mpc⁻¹'); plt.axvline(q16, color='k', ls=':', alpha=0.7); plt.axvline(q84, color='k', ls=':', alpha=0.7)
@@ -327,7 +350,7 @@ def save_and_plot_h0_posterior_viz(h0_samples, event_name, num_candidate_hosts=N
     title_str = f"$H_0$ Posterior - {event_name}"
     if num_candidate_hosts is not None: title_str += f"\n({num_candidate_hosts:,} Candidate Galaxies)"
     plt.title(title_str); plt.legend(); plt.grid(True, linestyle=':', alpha=0.5); plt.tight_layout()
-    plt.savefig(output_plot_file); print(f"Saved H0 posterior plot: {output_plot_file}")
+    plt.savefig(full_output_path_plot); logger.info(f"Saved H0 posterior plot: {full_output_path_plot}")
     plt.show(block=False); plt.pause(1)
 
 def create_walker_animation_gif(sampler, n_steps, burnin_steps, event_id,
@@ -340,22 +363,22 @@ def create_walker_animation_gif(sampler, n_steps, burnin_steps, event_id,
     try:
         full_chain = sampler.get_chain() # Shape: (n_steps, n_walkers, n_dim)
         if walker_idx >= full_chain.shape[1]:
-            print(f"❌ Error: Walker index {walker_idx} is out of bounds for {full_chain.shape[1]} walkers for event {event_id}.")
+            logger.error(f"❌ Error: Walker index {walker_idx} is out of bounds for {full_chain.shape[1]} walkers for event {event_id}.")
             return
         # Assuming H0 is the 0-th dimension, and chain has n_dim dimensions
         if full_chain.ndim < 3 or full_chain.shape[2] == 0 : # n_dim must be at least 1
-             print(f"❌ Error: Chain has unexpected dimensions {full_chain.shape} for event {event_id}.")
+             logger.error(f"❌ Error: Chain has unexpected dimensions {full_chain.shape} for event {event_id}.")
              return
         single_walker_h0_history = full_chain[:, walker_idx, 0]
     except Exception as e:
-        print(f"❌ Could not get chain for animation for event {event_id}: {e}")
+        logger.error(f"❌ Could not get chain for animation for event {event_id}: {e}")
         return
 
     if len(single_walker_h0_history) == 0:
-        print(f"No MCMC history found for walker {walker_idx} for event {event_id}.")
+        logger.warning(f"No MCMC history found for walker {walker_idx} for event {event_id}.")
         return
 
-    print(f"Generating MCMC walker animation for event {event_id}, walker {walker_idx}...")
+    logger.info(f"Generating MCMC walker animation for event {event_id}, walker {walker_idx}...")
 
     min_h0 = np.min(single_walker_h0_history)
     max_h0 = np.max(single_walker_h0_history)
@@ -376,7 +399,7 @@ def create_walker_animation_gif(sampler, n_steps, burnin_steps, event_id,
         if total_steps_in_chain > 0: # Ensure at least one frame if there's data
             steps_to_plot_indices = np.array([total_steps_in_chain - 1])
         else: # No data, no frames
-            print(f"⚠️ No frames to animate for walker {walker_idx} (event {event_id}) with plot_interval={plot_interval} and chain length {total_steps_in_chain}.")
+            logger.warning(f"⚠️ No frames to animate for walker {walker_idx} (event {event_id}) with plot_interval={plot_interval} and chain length {total_steps_in_chain}.")
             plt.close(fig)
             return
 
@@ -394,7 +417,7 @@ def create_walker_animation_gif(sampler, n_steps, burnin_steps, event_id,
         ax.axvline(burnin_steps, color='red', linestyle=':', linewidth=2, label=f'Burn-in Cutoff ({burnin_steps} steps)')
         ax.legend(loc='upper right') # Show legend if burn-in line is plotted
     elif burnin_steps >= effective_n_steps:
-        print(f"ℹ️ Burn-in ({burnin_steps}) is beyond or at chain length ({effective_n_steps}). Not shown in animation for walker {walker_idx}, event {event_id}.")
+        logger.info(f"ℹ️ Burn-in ({burnin_steps}) is beyond or at chain length ({effective_n_steps}). Not shown in animation for walker {walker_idx}, event {event_id}.")
 
 
     line, = ax.plot([], [], lw=1.5, color='dodgerblue', label=f'Walker {walker_idx} Path')
@@ -434,7 +457,7 @@ def create_walker_animation_gif(sampler, n_steps, burnin_steps, event_id,
 
     num_animation_frames = len(steps_to_plot_indices)
     if num_animation_frames == 0: # Should be caught earlier, but as a safeguard
-        print(f"⚠️ No frames to animate for walker {walker_idx} (event {event_id}) with plot_interval={plot_interval}. Chain length: {total_steps_in_chain}.")
+        logger.warning(f"⚠️ No frames to animate for walker {walker_idx} (event {event_id}) with plot_interval={plot_interval}. Chain length: {total_steps_in_chain}.")
         plt.close(fig)
         return
 
@@ -443,15 +466,16 @@ def create_walker_animation_gif(sampler, n_steps, burnin_steps, event_id,
     ani = FuncAnimation(fig, update_animation_func, frames=num_animation_frames,
                         init_func=init_animation_func, blit=True, interval=anim_interval)
 
-    output_filename = output_filename_template.format(walker_idx=walker_idx, event_id=event_id)
+    base_output_filename = output_filename_template.format(walker_idx=walker_idx, event_id=event_id)
+    full_output_path = os.path.join(OUTPUT_DIR, base_output_filename)
     try:
-        print(f"Attempting to save animation to {output_filename} (this may take a while)...")
-        ani.save(output_filename, writer='pillow', fps=fps)
-        print(f"✅ Animation saved successfully: {output_filename}")
+        logger.info(f"Attempting to save animation to {full_output_path} (this may take a while)...")
+        ani.save(full_output_path, writer='pillow', fps=fps)
+        logger.info(f"✅ Animation saved successfully: {full_output_path}")
     except Exception as e:
-        print(f"❌ Error saving animation for event {event_id}, walker {walker_idx}: {e}")
-        print("  Please ensure you have 'Pillow' installed (e.g., pip install Pillow).")
-        print("  Alternatively, you might need to install ImageMagick and specify writer='imagemagick'.")
+        logger.error(f"❌ Error saving animation for event {event_id}, walker {walker_idx}: {e}")
+        logger.error("  Please ensure you have 'Pillow' installed (e.g., pip install Pillow).")
+        logger.error("  Alternatively, you might need to install ImageMagick and specify writer='imagemagick'.")
     finally:
         plt.close(fig) # Ensure figure is closed after saving or error
 
@@ -461,31 +485,56 @@ def create_walker_animation_gif(sampler, n_steps, burnin_steps, event_id,
 def main():
     """Main function for visualization: fetches samples, processes catalog, plots, and optionally runs H0 MCMC."""
     
-    effective_cache_dir = configure_astropy_cache(DEFAULT_CACHE_DIR_NAME)
-    if not effective_cache_dir: print("❌ CRITICAL: Failed to configure cache. Exiting."); sys.exit(1)
+    parser = argparse.ArgumentParser(description="Visualize GW event data, skymaps, and run H0 MCMC.")
+    parser.add_argument(
+        "event_name", 
+        nargs='?', 
+        default=DEFAULT_EVENT_NAME_VIZ, 
+        help=f"Name of the GW event to process (default: {DEFAULT_EVENT_NAME_VIZ})"
+    )
+    parser.add_argument(
+        "-d", "--debug",
+        action="store_true",
+        help="Enable debug logging level."
+    )
+    args = parser.parse_args()
 
-    current_event_name = DEFAULT_EVENT_NAME_VIZ
-    if len(sys.argv) > 1: current_event_name = sys.argv[1]
-    print(f"--- Starting Full Visualization Analysis for Event: {current_event_name} ---")
+    # Configure basic logging based on CLI arguments
+    log_level = logging.DEBUG if args.debug else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[logging.StreamHandler(sys.stdout)]
+    )
+
+    # Create output directory if it doesn't exist
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    logger.info(f"Ensuring output directory exists: {os.path.abspath(OUTPUT_DIR)}")
+
+    effective_cache_dir = configure_astropy_cache(DEFAULT_CACHE_DIR_NAME)
+    if not effective_cache_dir: logger.critical("❌ CRITICAL: Failed to configure cache. Exiting."); sys.exit(1)
+
+    current_event_name = args.event_name # Use event_name from argparse
+    logger.info(f"--- Starting Full Visualization Analysis for Event: {current_event_name} (Log Level: {logging.getLevelName(logger.getEffectiveLevel())}) ---")
     
     # Initialize H0 to be used for the 3D plot; default or from MCMC
     H0_for_3d_dist_calc = 70.0  # Default H0 km/s/Mpc
-    print(f"ℹ️ Default H0 for 3D plot distance calculations initialized to: {H0_for_3d_dist_calc} km/s/Mpc")
+    logger.info(f"ℹ️ Default H0 for 3D plot distance calculations initialized to: {H0_for_3d_dist_calc} km/s/Mpc")
 
     # 1. Fetch GW data and extract parameters
-    print(f"Fetching GW data for {current_event_name}...")
+    logger.info(f"Fetching GW data for {current_event_name}...")
     success, gw_data_obj = fetch_candidate_data(current_event_name, effective_cache_dir)
-    if not success: print(f"❌ Failed to fetch GW data: {gw_data_obj}. Some visualizations might be skipped."); gw_data_obj = None
+    if not success: logger.error(f"❌ Failed to fetch GW data: {gw_data_obj}. Some visualizations might be skipped."); gw_data_obj = None
     
     dL_gw_samples, ra_gw_samples, dec_gw_samples = (None, None, None)
     if gw_data_obj:
         dL_gw_samples, ra_gw_samples, dec_gw_samples = extract_gw_event_parameters(gw_data_obj, current_event_name)
 
     if ra_gw_samples is None or dec_gw_samples is None:
-        print(f"❌ Failed to get essential RA/Dec samples for {current_event_name}. Sky maps will be skipped. MCMC may also be affected.")
+        logger.error(f"❌ Failed to get essential RA/Dec samples for {current_event_name}. Sky maps will be skipped. MCMC may also be affected.")
     else:
-        print(f"Successfully extracted {len(ra_gw_samples)} RA/Dec GW samples.")
-        if dL_gw_samples is not None: print(f"  and {len(dL_gw_samples)} dL samples.")
+        logger.info(f"Successfully extracted {len(ra_gw_samples)} RA/Dec GW samples.")
+        if dL_gw_samples is not None: logger.info(f"  and {len(dL_gw_samples)} dL samples.")
 
     # 2. Generate basic sky probability map (if RA/Dec available)
     prob_map_gw_for_plots, sky_mask_for_plots = (None, None)
@@ -503,17 +552,17 @@ def main():
             # )
             pass
         else:
-            print("Skipping basic sky probability map due to issues generating it.")
+            logger.warning("Skipping basic sky probability map due to issues generating it.")
     else:
-        print("Skipping basic sky probability map due to missing RA/Dec samples.")
+        logger.warning("Skipping basic sky probability map due to missing RA/Dec samples.")
 
-    print("\n--- Preparing data for skymap with galaxies and H0 MCMC ---")
+    logger.info("\n--- Preparing data for skymap with galaxies and H0 MCMC ---")
     # 3. Load and clean galaxy catalog
     glade_raw_df = download_and_load_galaxy_catalog(catalog_type=VIZ_CATALOG_TYPE)
-    if glade_raw_df.empty: print(f"❌ {VIZ_CATALOG_TYPE.upper()} catalog empty after loading. Galaxy-dependent plots and MCMC will be skipped."); return
+    if glade_raw_df.empty: logger.error(f"❌ {VIZ_CATALOG_TYPE.upper()} catalog empty after loading. Galaxy-dependent plots and MCMC will be skipped."); return
     
     glade_cleaned_df = clean_galaxy_catalog(glade_raw_df, range_filters=DEFAULT_RANGE_CHECKS)
-    if glade_cleaned_df.empty: print(f"❌ {VIZ_CATALOG_TYPE.upper()} catalog empty after cleaning. Galaxy-dependent plots and MCMC will be skipped."); return
+    if glade_cleaned_df.empty: logger.error(f"❌ {VIZ_CATALOG_TYPE.upper()} catalog empty after cleaning. Galaxy-dependent plots and MCMC will be skipped."); return
 
     # 4. Select candidate hosts for visualization and potential MCMC
     final_candidate_hosts_df = pd.DataFrame() 
@@ -531,7 +580,7 @@ def main():
                 intermediate_hosts_df, current_event_name, VIZ_GALAXY_CORRECTIONS
             )
     else:
-        print("Sky mask for CR not available or empty. Attempting selection from full catalog with z-cut for MCMC if needed.")
+        logger.warning("Sky mask for CR not available or empty. Attempting selection from full catalog with z-cut for MCMC if needed.")
         # Fallback: if no sky_mask, consider all cleaned galaxies up to z_max for MCMC (less optimal)
         # This path is more for ensuring MCMC can run if dL samples exist but skymap failed badly.
         intermediate_hosts_df = filter_galaxies_by_redshift(glade_cleaned_df, VIZ_HOST_Z_MAX)
@@ -540,9 +589,9 @@ def main():
         )
 
     if final_candidate_hosts_df.empty:
-        print(f"⚠️ No candidate host galaxies identified for {current_event_name} after selection process. Overlay plot might be sparse. MCMC for H0 might be skipped or use broader galaxy set.")
+        logger.warning(f"⚠️ No candidate host galaxies identified for {current_event_name} after selection process. Overlay plot might be sparse. MCMC for H0 might be skipped or use broader galaxy set.")
     else:
-        print(f"Final number of candidate hosts for {current_event_name} for overlay & H0: {len(final_candidate_hosts_df)}")
+        logger.info(f"Final number of candidate hosts for {current_event_name} for overlay & H0: {len(final_candidate_hosts_df)}")
         # plot_redshift_distribution(
         #     final_candidate_hosts_df, current_event_name, 
         #     "Final Candidate Hosts (for MCMC/Overlay)", host_z_max_cutoff=VIZ_HOST_Z_MAX
@@ -563,16 +612,16 @@ def main():
         # )
         pass
     else:
-        print("Skipping skymap with galaxies due to missing probability map or sky mask.")
+        logger.warning("Skipping skymap with galaxies due to missing probability map or sky mask.")
 
     # 5. Perform MCMC for H0 if dL samples and some candidate hosts are available
     can_run_mcmc = dL_gw_samples is not None and len(dL_gw_samples) > 0
     if can_run_mcmc and not final_candidate_hosts_df.empty:
-        print(f"\n--- Proceeding with MCMC H0 estimation for {current_event_name} (within viz.py) ---")
+        logger.info(f"\n--- Proceeding with MCMC H0 estimation for {current_event_name} (within viz.py) ---")
         try:
-            print(f"DEBUG VIZ: dL_gw_samples (first 5): {dL_gw_samples[:5]}, len: {len(dL_gw_samples)}, any non-finite: {np.any(~np.isfinite(dL_gw_samples))}")
+            logger.debug(f"DEBUG VIZ: dL_gw_samples (first 5): {dL_gw_samples[:5]}, len: {len(dL_gw_samples)}, any non-finite: {np.any(~np.isfinite(dL_gw_samples))}")
             zs_for_mcmc = final_candidate_hosts_df['z'].values
-            print(f"DEBUG VIZ: host_galaxies_z (first 5): {zs_for_mcmc[:5]}, len: {len(zs_for_mcmc)}, any non-finite: {np.any(~np.isfinite(zs_for_mcmc))}")
+            logger.debug(f"DEBUG VIZ: host_galaxies_z (first 5): {zs_for_mcmc[:5]}, len: {len(zs_for_mcmc)}, any non-finite: {np.any(~np.isfinite(zs_for_mcmc))}")
             
             log_likelihood_h0_func = get_log_likelihood_h0(
                 dL_gw_samples, zs_for_mcmc, # Use the printed variable
@@ -580,7 +629,7 @@ def main():
                 DEFAULT_H0_PRIOR_MIN, DEFAULT_H0_PRIOR_MAX
             )
         except ValueError as ve:
-            print(f"❌ Error creating H0 likelihood for viz: {ve}. Skipping MCMC."); log_likelihood_h0_func = None
+            logger.error(f"❌ Error creating H0 likelihood for viz: {ve}. Skipping MCMC."); log_likelihood_h0_func = None
 
         if log_likelihood_h0_func:
             mcmc_sampler = run_mcmc_h0(
@@ -595,10 +644,10 @@ def main():
                     # Update H0_for_3d_dist_calc with MCMC median result
                     _, q50_mcmc, _ = np.percentile(flat_h0_samples, [16, 50, 84])
                     H0_for_3d_dist_calc = q50_mcmc
-                    print(f"ℹ️ H0 for 3D plot distance calculations updated to MCMC median: {H0_for_3d_dist_calc:.1f} km/s/Mpc")
+                    logger.info(f"ℹ️ H0 for 3D plot distance calculations updated to MCMC median: {H0_for_3d_dist_calc:.1f} km/s/Mpc")
                 else:
-                    print(f"Skipping H0 posterior plot for {current_event_name} due to no valid MCMC samples after processing.")
-                    print(f"⚠️ MCMC samples not available after processing; 3D plot will use H0: {H0_for_3d_dist_calc:.1f} km/s/Mpc.")
+                    logger.warning(f"Skipping H0 posterior plot for {current_event_name} due to no valid MCMC samples after processing.")
+                    logger.warning(f"⚠️ MCMC samples not available after processing; 3D plot will use H0: {H0_for_3d_dist_calc:.1f} km/s/Mpc.")
 
                 # Create and save walker animation GIF
                 create_walker_animation_gif(
@@ -611,25 +660,25 @@ def main():
                     fps=15
                 )
             else:
-                print(f"Skipping MCMC post-processing for {current_event_name} because MCMC run failed or returned no sampler.")
-                print(f"⚠️ MCMC run failed; 3D plot will use H0: {H0_for_3d_dist_calc:.1f} km/s/Mpc.")
+                logger.error(f"Skipping MCMC post-processing for {current_event_name} because MCMC run failed or returned no sampler.")
+                logger.warning(f"⚠️ MCMC run failed; 3D plot will use H0: {H0_for_3d_dist_calc:.1f} km/s/Mpc.")
     elif not can_run_mcmc:
-        print(f"\n--- Skipping MCMC H0 estimation for {current_event_name} due to missing dL samples. 3D plot will use H0: {H0_for_3d_dist_calc:.1f} km/s/Mpc. ---")
+        logger.info(f"\n--- Skipping MCMC H0 estimation for {current_event_name} due to missing dL samples. 3D plot will use H0: {H0_for_3d_dist_calc:.1f} km/s/Mpc. ---")
     elif final_candidate_hosts_df.empty: # This implies dL_gw_samples were present, but no hosts found
-        print(f"\n--- Skipping MCMC H0 estimation for {current_event_name} because no candidate host galaxies were identified. 3D plot will use H0: {H0_for_3d_dist_calc:.1f} km/s/Mpc. ---")
+        logger.info(f"\n--- Skipping MCMC H0 estimation for {current_event_name} because no candidate host galaxies were identified. 3D plot will use H0: {H0_for_3d_dist_calc:.1f} km/s/Mpc. ---")
 
     # 6. Generate 3D Localization Plot
-    print(f"\n--- Preparing for 3D Localization Plot for {current_event_name} ---")
+    logger.info(f"\n--- Preparing for 3D Localization Plot for {current_event_name} ---")
     if ra_gw_samples is not None and dec_gw_samples is not None and dL_gw_samples is not None:
         
         # Ensure final_candidate_hosts_df is a DataFrame, even if empty.
         # The plot_3d_localization_with_galaxies function handles an empty DataFrame gracefully.
         effective_hosts_df_for_3d = final_candidate_hosts_df
         if not isinstance(final_candidate_hosts_df, pd.DataFrame):
-            print(f"⚠️ final_candidate_hosts_df was not a DataFrame (type: {type(final_candidate_hosts_df)}). Using empty DataFrame for 3D plot.")
+            logger.warning(f"⚠️ final_candidate_hosts_df was not a DataFrame (type: {type(final_candidate_hosts_df)}). Using empty DataFrame for 3D plot.")
             effective_hosts_df_for_3d = pd.DataFrame()
             if final_candidate_hosts_df is not None and len(final_candidate_hosts_df) > 0 : # if it was non-empty but not a df
-                 print("  Original final_candidate_hosts_df was not empty, this might indicate an issue.")
+                 logger.warning("  Original final_candidate_hosts_df was not empty, this might indicate an issue.")
 
 
         plot_3d_localization_with_galaxies(
@@ -640,13 +689,14 @@ def main():
             candidate_hosts_df=effective_hosts_df_for_3d,
             H0_for_galaxy_dist=H0_for_3d_dist_calc,
             omega_m_for_galaxy_dist=DEFAULT_OMEGA_M, # Imported from h0_mcmc_analyzer
-            num_gw_samples_to_plot=1000 # Default, can be made a VIZ_ constant
+            num_gw_samples_to_plot=1000, # Default, can be made a VIZ_ constant
+            output_dir=OUTPUT_DIR # Pass the output directory to the 3D plot function
         )
     else:
-        print(f"⚠️ Skipping 3D localization plot for {current_event_name} due to missing essential GW sample data (RA, Dec, or dL).")
+        logger.warning(f"⚠️ Skipping 3D localization plot for {current_event_name} due to missing essential GW sample data (RA, Dec, or dL).")
 
-    print(f"\n--- Visualization Script Finished for {current_event_name} ---")
-    print("Close all plot windows to exit script fully if plots are blocking.")
+    logger.info(f"\n--- Visualization Script Finished for {current_event_name} ---")
+    logger.info("Close all plot windows to exit script fully if plots are blocking.")
     plt.show() # Final show to ensure all non-blocking plots are displayed until closed
 
 if __name__ == "__main__":
