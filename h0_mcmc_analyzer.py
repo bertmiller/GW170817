@@ -61,43 +61,88 @@ def get_log_likelihood_h0(
 
     def log_likelihood(theta):
         H0 = theta[0]
+        print(f"DEBUG MCMC: log_likelihood called with H0 = {H0}")
+
         if not (h0_min <= H0 <= h0_max):
+            print(f"DEBUG MCMC: H0 = {H0} is outside prior range ({h0_min}, {h0_max}). Returning -inf.")
             return -np.inf
 
         # Calculate model luminosity distances for all host galaxies at this H0
         # model_d will be an array of shape (N_hosts,)
-        model_d_for_hosts = lum_dist_model(z_values, H0)
+        try: 
+            model_d_for_hosts = lum_dist_model(z_values, H0)
+            print(f"DEBUG MCMC: model_d_for_hosts (first 5 if available): {model_d_for_hosts[:min(5, len(model_d_for_hosts))]}") 
+            if np.any(~np.isfinite(model_d_for_hosts)): 
+                print(f"DEBUG MCMC: Non-finite values in model_d_for_hosts for H0 = {H0}. Example: {model_d_for_hosts[~np.isfinite(model_d_for_hosts)][:min(5, len(model_d_for_hosts[~np.isfinite(model_d_for_hosts)]))]}") 
+                return -np.inf 
+        except Exception as e: 
+            print(f"DEBUG MCMC: EXCEPTION in lum_dist_model for H0 = {H0}: {e}") 
+            return -np.inf 
         
         # Calculate sigma_d for each host based on its model_d
         # sigma_d_val_for_hosts will be array of shape (N_hosts,)
         sigma_d_val_for_hosts = (model_d_for_hosts / c_val) * sigma_v
         # Prevent sigma_d from being too small or zero to avoid numerical issues
         sigma_d_val_for_hosts = np.maximum(sigma_d_val_for_hosts, 1e-9) 
+        print(f"DEBUG MCMC: sigma_d_val_for_hosts (first 5 if available): {sigma_d_val_for_hosts[:min(5, len(sigma_d_val_for_hosts))]}") 
+        if np.any(~np.isfinite(sigma_d_val_for_hosts)): 
+            print(f"DEBUG MCMC: Non-finite values in sigma_d_val_for_hosts for H0 = {H0}.") 
+            return -np.inf
 
-        # Reshape dL_gw_samples to (N_samples, 1) for broadcasting
-        # Reshape model_d_for_hosts and sigma_d_val_for_hosts to (1, N_hosts) for broadcasting
-        # The result of norm.logpdf will be of shape (N_samples, N_hosts)
-        # This calculates log P(dL_s | H0, z_i) for each sample s and each host i
-        log_pdf_values = norm.logpdf(
-            dL_gw_samples[:, None], 
-            loc=model_d_for_hosts[None, :], 
-            scale=sigma_d_val_for_hosts[None, :]
-        )
+        # --- Memory-Efficient Likelihood Calculation --- 
+        # Iterate over host galaxies to avoid creating a huge (N_samples, N_hosts) matrix for log_pdf_values
+
+        log_P_data_H0_zi_terms = np.zeros(len(z_values)) # To store log P(data|H0,z_i) for each host
+
+        # dL_gw_samples is shape (N_samples,)
+        # model_d_for_hosts is shape (N_hosts,)
+        # sigma_d_val_for_hosts is shape (N_hosts,)
+
+        for i in range(len(z_values)): # Loop over each host galaxy
+            # For the i-th galaxy:
+            current_model_d = model_d_for_hosts[i]    # scalar
+            current_sigma_d = sigma_d_val_for_hosts[i]  # scalar
+
+            # Calculate log P(dL_s | H0, z_i) for all GW samples for THIS galaxy i
+            # log_pdf_for_one_galaxy will be of shape (N_samples,)
+            try:
+                log_pdf_for_one_galaxy = norm.logpdf(
+                    dL_gw_samples,          # Shape (N_samples,)
+                    loc=current_model_d,    # Scalar loc
+                    scale=current_sigma_d   # Scalar scale
+                )
+            except Exception as e:
+                print(f"DEBUG MCMC: EXCEPTION in norm.logpdf for H0 = {H0}, galaxy_idx = {i}: {e}")
+                log_pdf_for_one_galaxy = np.full(len(dL_gw_samples), -np.inf) # Penalize this galaxy if error
+
+            if np.any(~np.isfinite(log_pdf_for_one_galaxy)):
+                # This might happen if current_sigma_d is zero or nan, or current_model_d is problematic
+                # print(f"DEBUG MCMC: Non-finite log_pdf_for_one_galaxy for H0={H0}, galaxy_idx={i}. model_d={current_model_d}, sigma_d={current_sigma_d}")
+                # Set to a very low value, or handle as error for the galaxy
+                log_P_data_H0_zi_terms[i] = -np.inf # Or some very large negative number if all samples are non-finite for this galaxy
+            else:
+                # Marginalize over GW samples for THIS galaxy i
+                # log P(data | H0, z_i) = logsumexp(log P(dL_s | H0, z_i)) - log(N_samples)
+                log_P_data_H0_zi_terms[i] = np.logaddexp.reduce(log_pdf_for_one_galaxy) - np.log(len(dL_gw_samples))
+            
+            # Optional: progress print if N_hosts is very large and this loop takes time
+            # if i > 0 and i % 10000 == 0 and len(z_values) > 20000: # Print every 10000 galaxies if many
+            #    print(f"DEBUG MCMC: H0={H0:.2f}, processed likelihood for galaxy {i}/{len(z_values)}")
         
-        # Marginalize over GW samples (sum probabilities for each galaxy):
-        # log P(data | H0, z_i) = log [ (1/N_samples) * sum_s P(dL_s | H0, z_i) ]
-        # This is equivalent to logsumexp(log P(dL_s | H0, z_i)) - log(N_samples)
-        # log_sum_over_gw_samples will be of shape (N_hosts,)
-        log_sum_over_gw_samples = np.logaddexp.reduce(log_pdf_values, axis=0) - np.log(len(dL_gw_samples))
-        
+        # log_sum_over_gw_samples is now log_P_data_H0_zi_terms, which is shape (N_hosts,)
+        log_sum_over_gw_samples = log_P_data_H0_zi_terms
+        print(f"DEBUG MCMC: log_sum_over_gw_samples (iterative per galaxy) shape: {log_sum_over_gw_samples.shape}, any non-finite: {np.any(~np.isfinite(log_sum_over_gw_samples))}")
+
         # Marginalize over galaxies (sum probabilities for a given H0):
         # log P(data | H0) = log [ (1/N_hosts) * sum_i P(data | H0, z_i) ]
         # This is equivalent to logsumexp(log P(data | H0, z_i)) - log(N_hosts)
         # This assumes a uniform prior over the candidate host galaxies.
         total_log_likelihood = np.logaddexp.reduce(log_sum_over_gw_samples) - np.log(len(z_values))
+        print(f"DEBUG MCMC: total_log_likelihood = {total_log_likelihood}")
         
         if not np.isfinite(total_log_likelihood):
             # Helps catch numerical issues (e.g., if all log_pdf_values were -inf)
+            print(f"DEBUG MCMC: total_log_likelihood is not finite ({total_log_likelihood}) for H0 = {H0}. Returning -inf.")
             return -np.inf 
             
         return total_log_likelihood

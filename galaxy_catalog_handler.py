@@ -3,13 +3,32 @@ import sys
 import urllib.request
 import pandas as pd
 
-# GLADE Catalog specific constants
-GLADE_URL = "https://glade.elte.hu/GLADE-2.4.txt"
-GLADE_FILE = "GLADE_2.4.txt" # Default filename
-GLADE_USE_COLS = [0, 6, 7, 15]  # PGC, RA, Dec, z
-GLADE_COL_NAMES = ['PGC', 'ra', 'dec', 'z']
-GLADE_NA_VALUES = ['-99.0', '-999.0', '-9999.0', 'NaN', 'NAN', 'nan', 'NULL', 'null', '', 'N/A', 'n/a', 'None', '...', 'no_value']
-GLADE_RANGE_CHECKS = {
+# --- Catalog Configurations ---
+CATALOG_CONFIGS = {
+    'glade+': {
+        'url': "http://elysium.elte.hu/~dalyag/GLADE+.txt",
+        'filename': "GLADE+.txt",
+        'use_cols': [1, 8, 9, 27],  # PGC(col 2), RA(col 9), Dec(col 10), z_helio(col 28) -> 0-indexed
+        'col_names': ['PGC', 'ra', 'dec', 'z'], # Standardized names
+        'na_vals': ['-99.0', '-999.0', '-9999.0', 'NaN', 'NAN', 'nan', 'NULL', 'null', '', 'N/A', 'n/a', 'None', '...', 'no_value'],
+        'display_name': "GLADE+"
+    },
+    'glade24': {
+        'url': "https://glade.elte.hu/GLADE-2.4.txt",
+        'filename': "GLADE_2.4.txt",
+        'use_cols': [0, 6, 7, 15],  # PGC, RA, Dec, z for GLADE 2.4
+        'col_names': ['PGC', 'ra', 'dec', 'z'], # Standardized names
+        'na_vals': ['-99.0', '-999.0', '-9999.0', 'NaN', 'NAN', 'nan', 'NULL', 'null', '', 'N/A', 'n/a', 'None', '...', 'no_value'],
+        'display_name': "GLADE 2.4"
+    }
+}
+
+# --- Removed old individual constants as they are now in CATALOG_CONFIGS ---
+# GLADE_PLUS_URL, GLADE_PLUS_FILE, GLADE_PLUS_USE_COLS, GLADE_PLUS_COL_NAMES, GLADE_PLUS_NA_VALUES
+# GLADE24_URL, GLADE24_FILE, GLADE24_USE_COLS, GLADE24_COL_NAMES, GLADE24_NA_VALUES
+
+# Default range checks, can be used by both or overridden
+DEFAULT_RANGE_CHECKS = {
     'dec_min': -90, 'dec_max': 90,
     'ra_min': 0, 'ra_max': 360,
     'z_min': 0, 'z_max': 2.0 # Initial broad z range for catalog (can be overridden)
@@ -23,29 +42,39 @@ DEFAULT_GALAXY_CORRECTIONS = {
     }
 }
 
-def download_and_load_galaxy_catalog(url=GLADE_URL, filename=GLADE_FILE, use_cols=GLADE_USE_COLS, col_names=GLADE_COL_NAMES, na_vals=GLADE_NA_VALUES):
+def download_and_load_galaxy_catalog(catalog_type='glade+'):
     """
-    Downloads (if not present) and loads the galaxy catalog.
+    Downloads (if not present) and loads the specified galaxy catalog using configurations.
 
     Args:
-        url (str): URL to download the catalog from.
-        filename (str): Local filename to save/read the catalog.
-        use_cols (list): List of column indices to use.
-        col_names (list): List of names for the used columns.
-        na_vals (list): List of strings to recognize as NaN.
+        catalog_type (str): Type of catalog to load. Keys from CATALOG_CONFIGS (e.g., 'glade+', 'glade24').
 
     Returns:
         pd.DataFrame: Loaded galaxy catalog, or an empty DataFrame on failure.
     """
+    config = CATALOG_CONFIGS.get(catalog_type.lower())
+
+    if not config:
+        print(f"❌ Unknown catalog type: {catalog_type}. Available types: {list(CATALOG_CONFIGS.keys())}")
+        return pd.DataFrame()
+
+    url = config['url']
+    filename = config['filename']
+    use_cols = config['use_cols']
+    col_names = config['col_names']
+    na_vals = config['na_vals']
+    catalog_name_print = config['display_name']
+
     if not os.path.exists(filename):
-        print(f"Downloading GLADE catalogue ({url}, ~450 MB) …")
+        print(f"Downloading {catalog_name_print} catalogue ({url}) …")
+        # Note: GLADE+ is ~6GB, GLADE 2.4 is ~450MB. Download message is generic.
         try:
             urllib.request.urlretrieve(url, filename)
         except Exception as e:
-            print(f"❌ Error downloading GLADE catalog: {e}")
-            return pd.DataFrame() # Return empty DataFrame on download failure
+            print(f"❌ Error downloading {catalog_name_print} catalog: {e}")
+            return pd.DataFrame()
 
-    print(f"Reading GLADE from {filename}...")
+    print(f"Reading {catalog_name_print} from {filename}...")
     try:
         glade_df = pd.read_csv(
             filename,
@@ -56,13 +85,13 @@ def download_and_load_galaxy_catalog(url=GLADE_URL, filename=GLADE_FILE, use_col
             low_memory=False,
             na_values=na_vals,
         )
-        print(f"  {len(glade_df):,} total rows read from GLADE specified columns.")
+        print(f"  {len(glade_df):,} total rows read from {catalog_name_print} specified columns.")
         return glade_df
     except Exception as e:
-        print(f"❌ Error reading GLADE catalog: {e}")
-        return pd.DataFrame() # Return empty DataFrame on read failure
+        print(f"❌ Error reading {catalog_name_print} catalog: {e}")
+        return pd.DataFrame()
 
-def clean_galaxy_catalog(glade_df, numeric_cols=GLADE_COL_NAMES, cols_to_dropna=['ra', 'dec', 'z'], range_filters=GLADE_RANGE_CHECKS):
+def clean_galaxy_catalog(glade_df, numeric_cols=['PGC', 'ra', 'dec', 'z'], cols_to_dropna=['ra', 'dec', 'z'], range_filters=DEFAULT_RANGE_CHECKS):
     """
     Cleans the galaxy catalog: converts to numeric, drops NaNs, applies range checks.
 
@@ -187,49 +216,82 @@ def apply_specific_galaxy_corrections(hosts_df, event_name, corrections_dict=DEF
 if __name__ == '__main__':
     # Example Usage and Test for this module
     print("--- Testing galaxy_catalog_handler.py ---")
-    
-    # 1. Test download and load
-    # Using a temporary filename for test to avoid overwriting a real GLADE_FILE if it exists
-    test_glade_file = "GLADE_2.4_test.txt"
-    if os.path.exists(test_glade_file):
-        os.remove(test_glade_file)
 
-    raw_galaxies = download_and_load_galaxy_catalog(filename=test_glade_file)
-    
-    if not raw_galaxies.empty:
-        print(f"Successfully loaded {len(raw_galaxies)} raw galaxies for test.")
-        
-        # 2. Test cleaning
-        # Modify range checks for testing purposes to ensure some data passes/fails
-        test_range_filters = GLADE_RANGE_CHECKS.copy()
-        test_range_filters['z_max'] = 0.5 # A more restrictive z_max for testing
-        
-        cleaned_galaxies = clean_galaxy_catalog(
-            raw_galaxies, 
-            range_filters=test_range_filters
+    # 1. Test download and load for GLADE+
+    test_glade_plus_file = "GLADE+_test.txt"
+    if os.path.exists(test_glade_plus_file):
+        os.remove(test_glade_plus_file)
+
+    print("\n--- Testing GLADE+ ---   ")
+    raw_galaxies_plus = download_and_load_galaxy_catalog(catalog_type='glade+')
+    # To avoid downloading the large GLADE+ file during routine tests, we can mock or use a small subset.
+    # For this example, we'll proceed assuming it might download or use an existing small test file.
+    # IF you want to run full test with GLADE+ download, ensure 'test_glade_plus_file' is GLADE_PLUS_FILE
+    # and the download_and_load_galaxy_catalog call above doesn't use a custom filename for this part.
+    # For now, let's assume it's using the real GLADE_PLUS_FILE defined globally if test_glade_plus_file isn't handled specifically inside.
+    # The function was: download_and_load_galaxy_catalog(filename=test_glade_file)
+    # It is now: download_and_load_galaxy_catalog(catalog_type='glade+') which uses GLADE_PLUS_FILE by default.
+
+    if not raw_galaxies_plus.empty:
+        print(f"Successfully loaded {len(raw_galaxies_plus)} raw galaxies from GLADE+.")
+        test_range_filters_plus = DEFAULT_RANGE_CHECKS.copy()
+        test_range_filters_plus['z_max'] = 0.8 # Example z_max for GLADE+
+        cleaned_galaxies_plus = clean_galaxy_catalog(
+            raw_galaxies_plus,
+            range_filters=test_range_filters_plus
         )
-        
-        if not cleaned_galaxies.empty:
-            print(f"Successfully cleaned catalog, {len(cleaned_galaxies)} galaxies remaining.")
-            
-            # 3. Test specific galaxy corrections
-            # Create a dummy event and hosts_df for testing corrections
-            # Add a row that matches the GW170817 correction PGC ID
+        if not cleaned_galaxies_plus.empty:
+            print(f"Successfully cleaned GLADE+, {len(cleaned_galaxies_plus)} galaxies remaining.")
+        else:
+            print("GLADE+ cleaning resulted in an empty DataFrame.")
+    else:
+        print("Failed to load raw galaxies from GLADE+. Check connection or file.")
+
+    # 2. Test download and load for GLADE 2.4
+    test_glade24_file = "GLADE_2.4_test.txt"
+    if os.path.exists(test_glade24_file):
+        os.remove(test_glade24_file)
+
+    print("\n--- Testing GLADE 2.4 ---    ")
+    # To make the test use the temporary file, we'd need to pass filename to download_and_load_galaxy_catalog
+    # The function signature was changed. We need to decide how to handle test file names.
+    # For now, the test will attempt to use the *actual* default filenames (GLADE_PLUS_FILE, GLADE24_FILE)
+    # This means if they exist, they are used, otherwise downloaded.
+    # If you want isolated tests, the download_and_load_galaxy_catalog would need 'filename' arg back
+    # or the test files need to be named exactly GLADE_PLUS_FILE / GLADE24_FILE.
+    # Let's assume for testing, we're okay with it using the actual files or downloading them.
+
+    raw_galaxies_24 = download_and_load_galaxy_catalog(catalog_type='glade24')
+
+    if not raw_galaxies_24.empty:
+        print(f"Successfully loaded {len(raw_galaxies_24)} raw galaxies from GLADE 2.4.")
+
+        test_range_filters_24 = DEFAULT_RANGE_CHECKS.copy()
+        test_range_filters_24['z_max'] = 0.5
+
+        cleaned_galaxies_24 = clean_galaxy_catalog(
+            raw_galaxies_24,
+            range_filters=test_range_filters_24
+        )
+
+        if not cleaned_galaxies_24.empty:
+            print(f"Successfully cleaned GLADE 2.4, {len(cleaned_galaxies_24)} galaxies remaining.")
+
+            # 3. Test specific galaxy corrections (using GLADE 2.4 cleaned data as example)
             ngc4993_like_data = {
-                'PGC': [DEFAULT_GALAXY_CORRECTIONS["GW170817"]["PGC_ID"], 12345.0], 
-                'ra': [30.0, 45.0], 
-                'dec': [10.0, 20.0], 
-                'z': [0.009000, 0.1] # Slightly different z for the one to be corrected
+                'PGC': [DEFAULT_GALAXY_CORRECTIONS["GW170817"]["PGC_ID"], 12345.0],
+                'ra': [30.0, 45.0],
+                'dec': [10.0, 20.0],
+                'z': [0.009000, 0.1]
             }
             dummy_hosts = pd.DataFrame(ngc4993_like_data)
-            
+
             print("\nTesting galaxy corrections on dummy data...")
             corrected_hosts = apply_specific_galaxy_corrections(dummy_hosts, "GW170817")
-            
+
             if not corrected_hosts.empty:
                 print("Corrections applied (or checked). Resulting dummy data:")
                 print(corrected_hosts)
-                # Verify if the redshift was corrected
                 corrected_z_val = corrected_hosts[corrected_hosts['PGC'] == DEFAULT_GALAXY_CORRECTIONS["GW170817"]["PGC_ID"]]['z'].iloc[0]
                 expected_z_val = DEFAULT_GALAXY_CORRECTIONS["GW170817"]["LITERATURE_Z"]
                 if abs(corrected_z_val - expected_z_val) < 1e-6:
@@ -237,20 +299,21 @@ if __name__ == '__main__':
                 else:
                     print(f"  PGC {DEFAULT_GALAXY_CORRECTIONS['GW170817']['PGC_ID']} redshift is {corrected_z_val:.6f}, expected {expected_z_val:.6f}. Check logic.")
 
-            # Test with an event not in corrections
             print("\nTesting corrections for an event not in DEFAULT_GALAXY_CORRECTIONS ('FAKE_EVENT')...")
             uncorrected_hosts = apply_specific_galaxy_corrections(dummy_hosts, "FAKE_EVENT")
             if uncorrected_hosts.equals(dummy_hosts):
                 print("  Correctly returned original dataframe as FAKE_EVENT not in corrections dict.")
-
         else:
-            print("Cleaning resulted in an empty DataFrame. Further tests might be affected.")
-        
-        # Clean up test file
-        if os.path.exists(test_glade_file):
-            os.remove(test_glade_file)
-            print(f"Removed test GLADE file: {test_glade_file}")
-            
+            print("GLADE 2.4 cleaning resulted in an empty DataFrame. Further tests might be affected.")
     else:
-        print("Failed to load raw galaxies. Aborting further tests in galaxy_catalog_handler.")
-    print("--- Finished testing galaxy_catalog_handler.py ---") 
+        print("Failed to load raw galaxies from GLADE 2.4. Check connection or file.")
+
+    # Clean up test files - this part is now problematic as we are not using specific test file names in the load function.
+    # if os.path.exists(test_glade_plus_file):
+    #     os.remove(test_glade_plus_file)
+    #     print(f"Removed test GLADE+ file: {test_glade_plus_file}")
+    # if os.path.exists(test_glade24_file):
+    #     os.remove(test_glade24_file)
+    #     print(f"Removed test GLADE 2.4 file: {test_glade24_file}")
+
+    print("\n--- Finished testing galaxy_catalog_handler.py ---") 

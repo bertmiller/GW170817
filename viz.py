@@ -30,7 +30,7 @@ from galaxy_catalog_handler import (
     clean_galaxy_catalog,
     apply_specific_galaxy_corrections,
     DEFAULT_GALAXY_CORRECTIONS,
-    GLADE_URL, GLADE_FILE, GLADE_USE_COLS, GLADE_COL_NAMES, GLADE_NA_VALUES, GLADE_RANGE_CHECKS
+    DEFAULT_RANGE_CHECKS
 )
 
 # Sky Analysis and Candidate Selection
@@ -53,17 +53,21 @@ from h0_mcmc_analyzer import (
     DEFAULT_MCMC_THIN_BY, DEFAULT_H0_PRIOR_MIN, DEFAULT_H0_PRIOR_MAX
 )
 
+# Import the new 3D plotting function
+from plot_utils import plot_3d_localization_with_galaxies
+
 # -------------------------------------------------------------------
 # Configuration specific to this visualization script
 # -------------------------------------------------------------------
 DEFAULT_EVENT_NAME_VIZ = "GW170817"
+VIZ_CATALOG_TYPE = 'glade+' # Specify catalog type: 'glade+' or 'glade24'
 
 # HEALPix Sky Map parameters for this script
 VIZ_NSIDE_SKYMAP = MODULE_DEFAULT_NSIDE_SKYMAP # Use default from sky_analyzer, can be overridden
 
 # Analysis specific for host selection for this script
 VIZ_PROB_THRESHOLD_CDF = MODULE_DEFAULT_PROB_THRESHOLD_CDF # Use default from sky_analyzer
-VIZ_HOST_Z_MAX = 0.15 # Final redshift cut for candidate hosts in visualizations
+VIZ_HOST_Z_MAX = 0.05 # Final redshift cut for candidate hosts in visualizations
 
 # Galaxy corrections for this script
 VIZ_GALAXY_CORRECTIONS = DEFAULT_GALAXY_CORRECTIONS
@@ -328,7 +332,7 @@ def save_and_plot_h0_posterior_viz(h0_samples, event_name, num_candidate_hosts=N
 
 def create_walker_animation_gif(sampler, n_steps, burnin_steps, event_id,
                                 walker_idx=0,
-                                output_filename_template="mcmc_walker_{walker_idx}_{event_id}.gif",
+                                output_filename_template="{event_id}_walker_{walker_idx}_animation.gif",
                                 plot_interval=10, fps=15):
     """
     Creates a GIF animation of a single MCMC walker's path for H0.
@@ -373,6 +377,7 @@ def create_walker_animation_gif(sampler, n_steps, burnin_steps, event_id,
             steps_to_plot_indices = np.array([total_steps_in_chain - 1])
         else: # No data, no frames
             print(f"⚠️ No frames to animate for walker {walker_idx} (event {event_id}) with plot_interval={plot_interval} and chain length {total_steps_in_chain}.")
+            plt.close(fig)
             return
 
 
@@ -463,6 +468,10 @@ def main():
     if len(sys.argv) > 1: current_event_name = sys.argv[1]
     print(f"--- Starting Full Visualization Analysis for Event: {current_event_name} ---")
     
+    # Initialize H0 to be used for the 3D plot; default or from MCMC
+    H0_for_3d_dist_calc = 70.0  # Default H0 km/s/Mpc
+    print(f"ℹ️ Default H0 for 3D plot distance calculations initialized to: {H0_for_3d_dist_calc} km/s/Mpc")
+
     # 1. Fetch GW data and extract parameters
     print(f"Fetching GW data for {current_event_name}...")
     success, gw_data_obj = fetch_candidate_data(current_event_name, effective_cache_dir)
@@ -500,11 +509,11 @@ def main():
 
     print("\n--- Preparing data for skymap with galaxies and H0 MCMC ---")
     # 3. Load and clean galaxy catalog
-    glade_raw_df = download_and_load_galaxy_catalog(GLADE_URL, GLADE_FILE, GLADE_USE_COLS, GLADE_COL_NAMES, GLADE_NA_VALUES)
-    if glade_raw_df.empty: print("❌ GLADE catalog empty after loading. Galaxy-dependent plots and MCMC will be skipped."); return
-        
-    glade_cleaned_df = clean_galaxy_catalog(glade_raw_df, GLADE_COL_NAMES, ['ra', 'dec', 'z'], GLADE_RANGE_CHECKS)
-    if glade_cleaned_df.empty: print("❌ GLADE catalog empty after cleaning. Galaxy-dependent plots and MCMC will be skipped."); return
+    glade_raw_df = download_and_load_galaxy_catalog(catalog_type=VIZ_CATALOG_TYPE)
+    if glade_raw_df.empty: print(f"❌ {VIZ_CATALOG_TYPE.upper()} catalog empty after loading. Galaxy-dependent plots and MCMC will be skipped."); return
+    
+    glade_cleaned_df = clean_galaxy_catalog(glade_raw_df, range_filters=DEFAULT_RANGE_CHECKS)
+    if glade_cleaned_df.empty: print(f"❌ {VIZ_CATALOG_TYPE.upper()} catalog empty after cleaning. Galaxy-dependent plots and MCMC will be skipped."); return
 
     # 4. Select candidate hosts for visualization and potential MCMC
     final_candidate_hosts_df = pd.DataFrame() 
@@ -561,8 +570,12 @@ def main():
     if can_run_mcmc and not final_candidate_hosts_df.empty:
         print(f"\n--- Proceeding with MCMC H0 estimation for {current_event_name} (within viz.py) ---")
         try:
+            print(f"DEBUG VIZ: dL_gw_samples (first 5): {dL_gw_samples[:5]}, len: {len(dL_gw_samples)}, any non-finite: {np.any(~np.isfinite(dL_gw_samples))}")
+            zs_for_mcmc = final_candidate_hosts_df['z'].values
+            print(f"DEBUG VIZ: host_galaxies_z (first 5): {zs_for_mcmc[:5]}, len: {len(zs_for_mcmc)}, any non-finite: {np.any(~np.isfinite(zs_for_mcmc))}")
+            
             log_likelihood_h0_func = get_log_likelihood_h0(
-                dL_gw_samples, final_candidate_hosts_df['z'].values,
+                dL_gw_samples, zs_for_mcmc, # Use the printed variable
                 DEFAULT_SIGMA_V_PEC, DEFAULT_C_LIGHT, DEFAULT_OMEGA_M,
                 DEFAULT_H0_PRIOR_MIN, DEFAULT_H0_PRIOR_MAX
             )
@@ -579,7 +592,13 @@ def main():
                 flat_h0_samples = process_mcmc_samples(mcmc_sampler, current_event_name, VIZ_MCMC_BURNIN, VIZ_MCMC_THIN_BY, DEFAULT_MCMC_N_DIM)
                 if flat_h0_samples is not None and len(flat_h0_samples) > 0:
                     save_and_plot_h0_posterior_viz(flat_h0_samples, current_event_name, len(final_candidate_hosts_df))
-                else: print(f"Skipping H0 posterior plot for {current_event_name} due to no valid MCMC samples after processing.")
+                    # Update H0_for_3d_dist_calc with MCMC median result
+                    _, q50_mcmc, _ = np.percentile(flat_h0_samples, [16, 50, 84])
+                    H0_for_3d_dist_calc = q50_mcmc
+                    print(f"ℹ️ H0 for 3D plot distance calculations updated to MCMC median: {H0_for_3d_dist_calc:.1f} km/s/Mpc")
+                else:
+                    print(f"Skipping H0 posterior plot for {current_event_name} due to no valid MCMC samples after processing.")
+                    print(f"⚠️ MCMC samples not available after processing; 3D plot will use H0: {H0_for_3d_dist_calc:.1f} km/s/Mpc.")
 
                 # Create and save walker animation GIF
                 create_walker_animation_gif(
@@ -591,11 +610,40 @@ def main():
                     plot_interval=max(1, VIZ_MCMC_N_STEPS // 100), # Aim for ~100 frames, ensure at least 1
                     fps=15
                 )
-            else: print(f"Skipping MCMC post-processing for {current_event_name} because MCMC run failed or returned no sampler.")
+            else:
+                print(f"Skipping MCMC post-processing for {current_event_name} because MCMC run failed or returned no sampler.")
+                print(f"⚠️ MCMC run failed; 3D plot will use H0: {H0_for_3d_dist_calc:.1f} km/s/Mpc.")
     elif not can_run_mcmc:
-        print(f"\n--- Skipping MCMC H0 estimation for {current_event_name} due to missing dL samples. ---")
-    elif final_candidate_hosts_df.empty:
-        print(f"\n--- Skipping MCMC H0 estimation for {current_event_name} because no candidate host galaxies were identified. ---")
+        print(f"\n--- Skipping MCMC H0 estimation for {current_event_name} due to missing dL samples. 3D plot will use H0: {H0_for_3d_dist_calc:.1f} km/s/Mpc. ---")
+    elif final_candidate_hosts_df.empty: # This implies dL_gw_samples were present, but no hosts found
+        print(f"\n--- Skipping MCMC H0 estimation for {current_event_name} because no candidate host galaxies were identified. 3D plot will use H0: {H0_for_3d_dist_calc:.1f} km/s/Mpc. ---")
+
+    # 6. Generate 3D Localization Plot
+    print(f"\n--- Preparing for 3D Localization Plot for {current_event_name} ---")
+    if ra_gw_samples is not None and dec_gw_samples is not None and dL_gw_samples is not None:
+        
+        # Ensure final_candidate_hosts_df is a DataFrame, even if empty.
+        # The plot_3d_localization_with_galaxies function handles an empty DataFrame gracefully.
+        effective_hosts_df_for_3d = final_candidate_hosts_df
+        if not isinstance(final_candidate_hosts_df, pd.DataFrame):
+            print(f"⚠️ final_candidate_hosts_df was not a DataFrame (type: {type(final_candidate_hosts_df)}). Using empty DataFrame for 3D plot.")
+            effective_hosts_df_for_3d = pd.DataFrame()
+            if final_candidate_hosts_df is not None and len(final_candidate_hosts_df) > 0 : # if it was non-empty but not a df
+                 print("  Original final_candidate_hosts_df was not empty, this might indicate an issue.")
+
+
+        plot_3d_localization_with_galaxies(
+            event_name=current_event_name,
+            ra_gw_samples=ra_gw_samples,
+            dec_gw_samples=dec_gw_samples,
+            dL_gw_samples=dL_gw_samples,
+            candidate_hosts_df=effective_hosts_df_for_3d,
+            H0_for_galaxy_dist=H0_for_3d_dist_calc,
+            omega_m_for_galaxy_dist=DEFAULT_OMEGA_M, # Imported from h0_mcmc_analyzer
+            num_gw_samples_to_plot=1000 # Default, can be made a VIZ_ constant
+        )
+    else:
+        print(f"⚠️ Skipping 3D localization plot for {current_event_name} due to missing essential GW sample data (RA, Dec, or dL).")
 
     print(f"\n--- Visualization Script Finished for {current_event_name} ---")
     print("Close all plot windows to exit script fully if plots are blocking.")

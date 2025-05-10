@@ -9,17 +9,9 @@ Outputs:
   - 'H0_samples_<event_name>.npy'
   - 'H0_posterior_<event_name>.pdf'
 """
-import os, sys
-import urllib.request
+import sys
 import numpy as np
-import pandas as pd
-import healpy as hp
 import matplotlib.pyplot as plt
-from scipy.stats import norm
-from astropy.cosmology import FlatLambdaCDM
-from astropy import units as u
-from astropy.coordinates import SkyCoord
-import emcee
 
 # Import from our new module
 from gw_data_fetcher import fetch_candidate_data, configure_astropy_cache, DEFAULT_CACHE_DIR_NAME
