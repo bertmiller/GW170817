@@ -12,6 +12,7 @@ import healpy as hp
 import matplotlib.pyplot as plt
 import pandas as pd # Added for DataFrame operations
 from matplotlib.lines import Line2D # Added for custom legend
+from matplotlib.animation import FuncAnimation # Added for GIF animation
 import urllib.request # For downloading GLADE
 from astropy.coordinates import SkyCoord # For select_candidate_hosts
 from astropy import units as u # For select_candidate_hosts
@@ -221,11 +222,14 @@ def plot_skymap_with_galaxies(
         if not galaxies_within_z_cut.empty:
             if not selected_hosts_df.empty and 'PGC' in galaxies_within_z_cut.columns and 'PGC' in selected_hosts_df.columns:
                 # Ensure PGC columns are of compatible types for isin (e.g., string or float)
-                pgc_selected_ids = selected_hosts_df['PGC'].dropna().astype(str).unique()
-                galaxies_within_z_cut_pgc_str = galaxies_within_z_cut['PGC'].dropna().astype(str)
-                is_not_selected = ~galaxies_within_z_cut_pgc_str.isin(pgc_selected_ids)
+                pgc_selected_ids_set = set(selected_hosts_df['PGC'].dropna().astype(str))
+                
+                # Use .apply() to ensure the boolean mask 'is_not_selected' has an index aligned with 'galaxies_within_z_cut'
+                is_not_selected = galaxies_within_z_cut['PGC'].apply(lambda pgc: str(pgc) not in pgc_selected_ids_set)
+                
                 galaxies_to_plot_other_in_z_cut = galaxies_within_z_cut[is_not_selected]
             else:
+                # If PGC info is missing for comparison or no selected hosts, all within z-cut are "other"
                 galaxies_to_plot_other_in_z_cut = galaxies_within_z_cut
             
             if not galaxies_to_plot_other_in_z_cut.empty:
@@ -268,18 +272,32 @@ def plot_mcmc_trace(sampler, event_name, burnin_steps, n_walkers_total, mcmc_n_d
     # if full_chain.shape[1] != n_walkers_total: print(f"⚠️ Walker number mismatch. Expected {n_walkers_total}, chain has {full_chain.shape[1]}. Plotting available walkers.")
 
     plt.figure(figsize=(12, 6))
-    num_walkers_to_plot = min(full_chain.shape[1], 16) # Plot a subset if too many
+    num_walkers_to_plot = min(full_chain.shape[1], 5) # Plot a subset of up to 5 walkers
     for i in range(num_walkers_to_plot):
-        plt.plot(full_chain[:, i, 0], alpha=0.7, lw=0.5, label=f'Walker {i}' if num_walkers_to_plot <= 16 and full_chain.shape[1] >1 else None)
-    if full_chain.shape[1] == 1 and num_walkers_to_plot ==1 : plt.plot(full_chain[:,0,0], alpha=0.7, lw=0.5, label='Walker 0') # Single walker case
+        # Label walkers if we are plotting 5 or fewer and there is more than one walker
+        label = None
+        if num_walkers_to_plot <= 5:
+            if full_chain.shape[1] > 1:
+                label = f'Walker {i}'
+            elif full_chain.shape[1] == 1: # Single walker case
+                label = 'Walker 0'
+        plt.plot(full_chain[:, i, 0], alpha=0.7, lw=0.5, label=label)
 
     if burnin_steps > 0 and burnin_steps < full_chain.shape[0]: plt.axvline(burnin_steps, color='k', linestyle=':', linewidth=2, label=f'Burn-in Cutoff ({burnin_steps} steps)')
     
     plt.xlabel("MCMC Step Number"); plt.ylabel("$H_0$ Value (km s⁻¹ Mpc⁻¹)"); plt.title(f"Trace Plot for MCMC Walkers ($H_0$) - {event_name}")
-    if num_walkers_to_plot <= 16 and num_walkers_to_plot > 0 and full_chain.shape[1] > 1: plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
-    elif full_chain.shape[1] == 1: plt.legend()
+    # Show legend if labels were assigned
+    if num_walkers_to_plot > 0 and any(plt.gca().get_legend_handles_labels()[1]):
+        if full_chain.shape[1] > 1 and num_walkers_to_plot <=5: # Legend outside for multiple walkers if few are plotted
+             plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+        elif full_chain.shape[1] == 1: # Standard legend for single walker
+            plt.legend()
+        # No legend if many walkers are plotted without individual labels (though current logic plots at most 5)
+            
     plt.grid(True, alpha=0.3);
-    plt.tight_layout(rect=[0, 0, 0.85 if num_walkers_to_plot <=16 and full_chain.shape[1] > 1 else 1, 1])
+    # Adjust layout for external legend if present
+    legend_is_external = full_chain.shape[1] > 1 and num_walkers_to_plot <= 5 and any(plt.gca().get_legend_handles_labels()[1])
+    plt.tight_layout(rect=[0, 0, 0.85 if legend_is_external else 1, 1])
     
     output_filename = f"mcmc_trace_{event_name}.pdf"
     try: plt.savefig(output_filename); print(f"MCMC trace plot saved to {output_filename}")
@@ -307,6 +325,130 @@ def save_and_plot_h0_posterior_viz(h0_samples, event_name, num_candidate_hosts=N
     plt.title(title_str); plt.legend(); plt.grid(True, linestyle=':', alpha=0.5); plt.tight_layout()
     plt.savefig(output_plot_file); print(f"Saved H0 posterior plot: {output_plot_file}")
     plt.show(block=False); plt.pause(1)
+
+def create_walker_animation_gif(sampler, n_steps, burnin_steps, event_id,
+                                walker_idx=0,
+                                output_filename_template="mcmc_walker_{walker_idx}_{event_id}.gif",
+                                plot_interval=10, fps=15):
+    """
+    Creates a GIF animation of a single MCMC walker's path for H0.
+    """
+    try:
+        full_chain = sampler.get_chain() # Shape: (n_steps, n_walkers, n_dim)
+        if walker_idx >= full_chain.shape[1]:
+            print(f"❌ Error: Walker index {walker_idx} is out of bounds for {full_chain.shape[1]} walkers for event {event_id}.")
+            return
+        # Assuming H0 is the 0-th dimension, and chain has n_dim dimensions
+        if full_chain.ndim < 3 or full_chain.shape[2] == 0 : # n_dim must be at least 1
+             print(f"❌ Error: Chain has unexpected dimensions {full_chain.shape} for event {event_id}.")
+             return
+        single_walker_h0_history = full_chain[:, walker_idx, 0]
+    except Exception as e:
+        print(f"❌ Could not get chain for animation for event {event_id}: {e}")
+        return
+
+    if len(single_walker_h0_history) == 0:
+        print(f"No MCMC history found for walker {walker_idx} for event {event_id}.")
+        return
+
+    print(f"Generating MCMC walker animation for event {event_id}, walker {walker_idx}...")
+
+    min_h0 = np.min(single_walker_h0_history)
+    max_h0 = np.max(single_walker_h0_history)
+    padding_h0 = (max_h0 - min_h0) * 0.1
+    y_min_limit = min_h0 - padding_h0
+    y_max_limit = max_h0 + padding_h0
+
+    total_steps_in_chain = len(single_walker_h0_history)
+    effective_n_steps = total_steps_in_chain # Use actual chain length for x-limit
+
+    # Ensure n_steps (from config) is used if it's the intended x-axis visual limit,
+    # but animation frames should not exceed actual chain length.
+    # The original code uses effective_n_steps (total_steps_in_chain) for xlim, which is good.
+    # The `n_steps` parameter to this function is more of an expectation or for context.
+
+    steps_to_plot_indices = np.arange(0, total_steps_in_chain, plot_interval)
+    if not steps_to_plot_indices.size: # If plot_interval is too large for the chain length
+        if total_steps_in_chain > 0: # Ensure at least one frame if there's data
+            steps_to_plot_indices = np.array([total_steps_in_chain - 1])
+        else: # No data, no frames
+            print(f"⚠️ No frames to animate for walker {walker_idx} (event {event_id}) with plot_interval={plot_interval} and chain length {total_steps_in_chain}.")
+            return
+
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.set_xlim(0, effective_n_steps)
+    ax.set_ylim(y_min_limit, y_max_limit)
+    ax.set_xlabel("MCMC Step Number")
+    ax.set_ylabel("$H_0$ Value (km s⁻¹ Mpc⁻¹)")
+    ax.set_title(f"Path of MCMC Walker {walker_idx} for $H_0$ ({event_id})")
+    ax.grid(True, alpha=0.3)
+
+    # Plot burn-in line only if burnin_steps is within the chain's range
+    if 0 < burnin_steps < effective_n_steps:
+        ax.axvline(burnin_steps, color='red', linestyle=':', linewidth=2, label=f'Burn-in Cutoff ({burnin_steps} steps)')
+        ax.legend(loc='upper right') # Show legend if burn-in line is plotted
+    elif burnin_steps >= effective_n_steps:
+        print(f"ℹ️ Burn-in ({burnin_steps}) is beyond or at chain length ({effective_n_steps}). Not shown in animation for walker {walker_idx}, event {event_id}.")
+
+
+    line, = ax.plot([], [], lw=1.5, color='dodgerblue', label=f'Walker {walker_idx} Path')
+    point, = ax.plot([], [], 'o', color='red', markersize=8, label='Current Position')
+    step_text = ax.text(0.02, 0.95, '', transform=ax.transAxes, fontsize=10,
+                        verticalalignment='top',
+                        bbox=dict(boxstyle='round,pad=0.3', fc='wheat', alpha=0.5))
+    
+    # Update legend to include line and point if not showing burn-in legend
+    if not (0 < burnin_steps < effective_n_steps):
+        handles, labels = ax.get_legend_handles_labels()
+        if not handles: # Add default legend if no burn-in line
+             ax.legend([line, point], [f'Walker {walker_idx} Path', 'Current Position'], loc='upper right')
+
+
+    def init_animation_func():
+        line.set_data([], [])
+        point.set_data([], [])
+        step_text.set_text('')
+        return line, point, step_text
+
+    def update_animation_func(frame_idx):
+        # frame_idx is the actual index from steps_to_plot_indices
+        current_mcmc_step_to_show = steps_to_plot_indices[frame_idx]
+        
+        # Ensure x_data and y_data are indexed correctly up to current_mcmc_step_to_show
+        x_data_path = np.arange(0, current_mcmc_step_to_show + 1)
+        y_data_path = single_walker_h0_history[:current_mcmc_step_to_show + 1]
+        
+        line.set_data(x_data_path, y_data_path)
+        
+        current_h0_value = single_walker_h0_history[current_mcmc_step_to_show]
+        point.set_data([current_mcmc_step_to_show], [current_h0_value]) # x needs to be a list/array
+        
+        step_text.set_text(f'Step: {current_mcmc_step_to_show}\n$H_0$: {current_h0_value:.2f}')
+        return line, point, step_text
+
+    num_animation_frames = len(steps_to_plot_indices)
+    if num_animation_frames == 0: # Should be caught earlier, but as a safeguard
+        print(f"⚠️ No frames to animate for walker {walker_idx} (event {event_id}) with plot_interval={plot_interval}. Chain length: {total_steps_in_chain}.")
+        plt.close(fig)
+        return
+
+    # Interval is in milliseconds. max(20, ...) ensures it's not too fast for display.
+    anim_interval = max(20, 1000 // fps) 
+    ani = FuncAnimation(fig, update_animation_func, frames=num_animation_frames,
+                        init_func=init_animation_func, blit=True, interval=anim_interval)
+
+    output_filename = output_filename_template.format(walker_idx=walker_idx, event_id=event_id)
+    try:
+        print(f"Attempting to save animation to {output_filename} (this may take a while)...")
+        ani.save(output_filename, writer='pillow', fps=fps)
+        print(f"✅ Animation saved successfully: {output_filename}")
+    except Exception as e:
+        print(f"❌ Error saving animation for event {event_id}, walker {walker_idx}: {e}")
+        print("  Please ensure you have 'Pillow' installed (e.g., pip install Pillow).")
+        print("  Alternatively, you might need to install ImageMagick and specify writer='imagemagick'.")
+    finally:
+        plt.close(fig) # Ensure figure is closed after saving or error
 
 # -------------------------------------------------------------------
 # Main script execution for viz.py
@@ -345,11 +487,12 @@ def main():
             cdf_threshold=VIZ_PROB_THRESHOLD_CDF
         )
         if prob_map_gw_for_plots is not None and prob_map_gw_for_plots.sum() > 0:
-            plot_basic_sky_probability_map(
-                prob_map_gw_for_plots,
-                VIZ_NSIDE_SKYMAP,
-                current_event_name
-            )
+            # plot_basic_sky_probability_map(
+            #     prob_map_gw_for_plots,
+            #     VIZ_NSIDE_SKYMAP,
+            #     current_event_name
+            # )
+            pass
         else:
             print("Skipping basic sky probability map due to issues generating it.")
     else:
@@ -370,10 +513,10 @@ def main():
             glade_cleaned_df, sky_mask_for_plots, nside=VIZ_NSIDE_SKYMAP
         )
         if not spatially_selected_galaxies_df.empty:
-            plot_redshift_distribution(
-                spatially_selected_galaxies_df, current_event_name, 
-                "Spatially Selected (in C.R.)", host_z_max_cutoff=VIZ_HOST_Z_MAX
-            )
+            # plot_redshift_distribution(
+            #     spatially_selected_galaxies_df, current_event_name, 
+            #     "Spatially Selected (in C.R.)", host_z_max_cutoff=VIZ_HOST_Z_MAX
+            # )
             intermediate_hosts_df = filter_galaxies_by_redshift(spatially_selected_galaxies_df, VIZ_HOST_Z_MAX)
             final_candidate_hosts_df = apply_specific_galaxy_corrections(
                 intermediate_hosts_df, current_event_name, VIZ_GALAXY_CORRECTIONS
@@ -391,23 +534,25 @@ def main():
         print(f"⚠️ No candidate host galaxies identified for {current_event_name} after selection process. Overlay plot might be sparse. MCMC for H0 might be skipped or use broader galaxy set.")
     else:
         print(f"Final number of candidate hosts for {current_event_name} for overlay & H0: {len(final_candidate_hosts_df)}")
-        plot_redshift_distribution(
-            final_candidate_hosts_df, current_event_name, 
-            "Final Candidate Hosts (for MCMC/Overlay)", host_z_max_cutoff=VIZ_HOST_Z_MAX
-        )
+        # plot_redshift_distribution(
+        #     final_candidate_hosts_df, current_event_name, 
+        #     "Final Candidate Hosts (for MCMC/Overlay)", host_z_max_cutoff=VIZ_HOST_Z_MAX
+        # )
+        pass
 
     # Plot skymap with galaxies (if prob_map_gw and sky_mask_for_plots were generated)
     if prob_map_gw_for_plots is not None and sky_mask_for_plots is not None:
-        plot_skymap_with_galaxies(
-            prob_map_gw=prob_map_gw_for_plots,
-            sky_mask_boolean=sky_mask_for_plots,
-            all_galaxies_df=glade_cleaned_df,
-            selected_hosts_df=final_candidate_hosts_df, # Use the most refined set for highlighting
-            nside=VIZ_NSIDE_SKYMAP,
-            event_name=current_event_name,
-            cred_level_percent=VIZ_PROB_THRESHOLD_CDF * 100,
-            host_z_max=VIZ_HOST_Z_MAX
-        )
+        # plot_skymap_with_galaxies(
+        #     prob_map_gw=prob_map_gw_for_plots,
+        #     sky_mask_boolean=sky_mask_for_plots,
+        #     all_galaxies_df=glade_cleaned_df,
+        #     selected_hosts_df=final_candidate_hosts_df, # Use the most refined set for highlighting
+        #     nside=VIZ_NSIDE_SKYMAP,
+        #     event_name=current_event_name,
+        #     cred_level_percent=VIZ_PROB_THRESHOLD_CDF * 100,
+        #     host_z_max=VIZ_HOST_Z_MAX
+        # )
+        pass
     else:
         print("Skipping skymap with galaxies due to missing probability map or sky mask.")
 
@@ -435,6 +580,17 @@ def main():
                 if flat_h0_samples is not None and len(flat_h0_samples) > 0:
                     save_and_plot_h0_posterior_viz(flat_h0_samples, current_event_name, len(final_candidate_hosts_df))
                 else: print(f"Skipping H0 posterior plot for {current_event_name} due to no valid MCMC samples after processing.")
+
+                # Create and save walker animation GIF
+                create_walker_animation_gif(
+                    sampler=mcmc_sampler,
+                    n_steps=VIZ_MCMC_N_STEPS,       # Total steps configured for MCMC
+                    burnin_steps=VIZ_MCMC_BURNIN,   # Burn-in steps configured
+                    event_id=current_event_name,
+                    walker_idx=0,                   # Animate the first walker by default
+                    plot_interval=max(1, VIZ_MCMC_N_STEPS // 100), # Aim for ~100 frames, ensure at least 1
+                    fps=15
+                )
             else: print(f"Skipping MCMC post-processing for {current_event_name} because MCMC run failed or returned no sampler.")
     elif not can_run_mcmc:
         print(f"\n--- Skipping MCMC H0 estimation for {current_event_name} due to missing dL samples. ---")
