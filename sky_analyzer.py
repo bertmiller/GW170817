@@ -38,7 +38,7 @@ def generate_sky_map_and_credible_region(ra_gw_samples, dec_gw_samples, nside=DE
         logger.warning("⚠️ RA or Dec GW samples are empty or None. Cannot generate sky map.")
         return empty_prob_map, empty_sky_mask, 0.0
 
-    logger.info(f"\nBuilding GW probability sky-map (Nside={nside})...")
+    logger.info(f"Building GW probability sky-map (Nside={nside})...")
     ipix_gw = hp.ang2pix(nside, ra_gw_samples, dec_gw_samples, lonlat=True)
     prob_map_gw = np.bincount(ipix_gw, minlength=npix).astype(float)
     

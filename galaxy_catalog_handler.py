@@ -164,7 +164,7 @@ def clean_galaxy_catalog(glade_df, numeric_cols=['PGC', 'ra', 'dec', 'z'], cols_
     if not df_cleaned.empty:
         logger.info("  Sample of cleaned galaxy data (head):")
         # Convert head to string to log it; avoids multi-line issues with some log formatters
-        logger.info("\n" + df_cleaned.head().to_string())
+        logger.info(df_cleaned.head().to_string())
     else:
         logger.info("  No galaxies remaining after range checks.")
     return df_cleaned

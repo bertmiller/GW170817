@@ -19,6 +19,7 @@ from astropy import units as u # For select_candidate_hosts
 from astropy.cosmology import FlatLambdaCDM # For H0 likelihood
 from scipy.stats import norm # For H0 likelihood
 import emcee # For MCMC
+from emcee.interruptible_pool import InterruptiblePool # For parallel MCMC
 import logging # Added logging
 import argparse # Added argparse
 
@@ -556,7 +557,7 @@ def main():
     else:
         logger.warning("Skipping basic sky probability map due to missing RA/Dec samples.")
 
-    logger.info("\n--- Preparing data for skymap with galaxies and H0 MCMC ---")
+    logger.info("--- Preparing data for skymap with galaxies and H0 MCMC ---")
     # 3. Load and clean galaxy catalog
     glade_raw_df = download_and_load_galaxy_catalog(catalog_type=VIZ_CATALOG_TYPE)
     if glade_raw_df.empty: logger.error(f"❌ {VIZ_CATALOG_TYPE.upper()} catalog empty after loading. Galaxy-dependent plots and MCMC will be skipped."); return
@@ -632,43 +633,49 @@ def main():
             logger.error(f"❌ Error creating H0 likelihood for viz: {ve}. Skipping MCMC."); log_likelihood_h0_func = None
 
         if log_likelihood_h0_func:
-            mcmc_sampler = run_mcmc_h0(
-                log_likelihood_h0_func, current_event_name,
-                n_walkers=VIZ_MCMC_N_WALKERS, n_steps=VIZ_MCMC_N_STEPS
-            )
-            if mcmc_sampler:
-                plot_mcmc_trace(mcmc_sampler, current_event_name, VIZ_MCMC_BURNIN, VIZ_MCMC_N_WALKERS, DEFAULT_MCMC_N_DIM)
-                flat_h0_samples = process_mcmc_samples(mcmc_sampler, current_event_name, VIZ_MCMC_BURNIN, VIZ_MCMC_THIN_BY, DEFAULT_MCMC_N_DIM)
-                if flat_h0_samples is not None and len(flat_h0_samples) > 0:
-                    save_and_plot_h0_posterior_viz(flat_h0_samples, current_event_name, len(final_candidate_hosts_df))
-                    # Update H0_for_3d_dist_calc with MCMC median result
-                    _, q50_mcmc, _ = np.percentile(flat_h0_samples, [16, 50, 84])
-                    H0_for_3d_dist_calc = q50_mcmc
-                    logger.info(f"ℹ️ H0 for 3D plot distance calculations updated to MCMC median: {H0_for_3d_dist_calc:.1f} km/s/Mpc")
-                else:
-                    logger.warning(f"Skipping H0 posterior plot for {current_event_name} due to no valid MCMC samples after processing.")
-                    logger.warning(f"⚠️ MCMC samples not available after processing; 3D plot will use H0: {H0_for_3d_dist_calc:.1f} km/s/Mpc.")
+            # Determine number of cores for parallelization
+            n_cores = os.cpu_count()
+            logger.info(f"Utilizing {n_cores} cores for MCMC parallelization.")
 
-                # Create and save walker animation GIF
-                create_walker_animation_gif(
-                    sampler=mcmc_sampler,
-                    n_steps=VIZ_MCMC_N_STEPS,       # Total steps configured for MCMC
-                    burnin_steps=VIZ_MCMC_BURNIN,   # Burn-in steps configured
-                    event_id=current_event_name,
-                    walker_idx=0,                   # Animate the first walker by default
-                    plot_interval=max(1, VIZ_MCMC_N_STEPS // 100), # Aim for ~100 frames, ensure at least 1
-                    fps=15
+            with InterruptiblePool(n_cores) as pool:
+                mcmc_sampler = run_mcmc_h0(
+                    log_likelihood_h0_func, current_event_name,
+                    n_walkers=VIZ_MCMC_N_WALKERS, n_steps=VIZ_MCMC_N_STEPS,
+                    pool=pool # Pass the pool object
                 )
-            else:
-                logger.error(f"Skipping MCMC post-processing for {current_event_name} because MCMC run failed or returned no sampler.")
-                logger.warning(f"⚠️ MCMC run failed; 3D plot will use H0: {H0_for_3d_dist_calc:.1f} km/s/Mpc.")
+                if mcmc_sampler:
+                    plot_mcmc_trace(mcmc_sampler, current_event_name, VIZ_MCMC_BURNIN, VIZ_MCMC_N_WALKERS, DEFAULT_MCMC_N_DIM)
+                    flat_h0_samples = process_mcmc_samples(mcmc_sampler, current_event_name, VIZ_MCMC_BURNIN, VIZ_MCMC_THIN_BY, DEFAULT_MCMC_N_DIM)
+                    if flat_h0_samples is not None and len(flat_h0_samples) > 0:
+                        save_and_plot_h0_posterior_viz(flat_h0_samples, current_event_name, len(final_candidate_hosts_df))
+                        # Update H0_for_3d_dist_calc with MCMC median result
+                        _, q50_mcmc, _ = np.percentile(flat_h0_samples, [16, 50, 84])
+                        H0_for_3d_dist_calc = q50_mcmc
+                        logger.info(f"ℹ️ H0 for 3D plot distance calculations updated to MCMC median: {H0_for_3d_dist_calc:.1f} km/s/Mpc")
+                    else:
+                        logger.warning(f"Skipping H0 posterior plot for {current_event_name} due to no valid MCMC samples after processing.")
+                        logger.warning(f"⚠️ MCMC samples not available after processing; 3D plot will use H0: {H0_for_3d_dist_calc:.1f} km/s/Mpc.")
+
+                    # Create and save walker animation GIF
+                    create_walker_animation_gif(
+                        sampler=mcmc_sampler,
+                        n_steps=VIZ_MCMC_N_STEPS,       # Total steps configured for MCMC
+                        burnin_steps=VIZ_MCMC_BURNIN,   # Burn-in steps configured
+                        event_id=current_event_name,
+                        walker_idx=0,                   # Animate the first walker by default
+                        plot_interval=max(1, VIZ_MCMC_N_STEPS // 100), # Aim for ~100 frames, ensure at least 1
+                        fps=15
+                    )
+                else:
+                    logger.error(f"Skipping MCMC post-processing for {current_event_name} because MCMC run failed or returned no sampler.")
+                    logger.warning(f"⚠️ MCMC run failed; 3D plot will use H0: {H0_for_3d_dist_calc:.1f} km/s/Mpc.")
     elif not can_run_mcmc:
         logger.info(f"\n--- Skipping MCMC H0 estimation for {current_event_name} due to missing dL samples. 3D plot will use H0: {H0_for_3d_dist_calc:.1f} km/s/Mpc. ---")
     elif final_candidate_hosts_df.empty: # This implies dL_gw_samples were present, but no hosts found
         logger.info(f"\n--- Skipping MCMC H0 estimation for {current_event_name} because no candidate host galaxies were identified. 3D plot will use H0: {H0_for_3d_dist_calc:.1f} km/s/Mpc. ---")
 
     # 6. Generate 3D Localization Plot
-    logger.info(f"\n--- Preparing for 3D Localization Plot for {current_event_name} ---")
+    logger.info(f"--- Preparing for 3D Localization Plot for {current_event_name} ---")
     if ra_gw_samples is not None and dec_gw_samples is not None and dL_gw_samples is not None:
         
         # Ensure final_candidate_hosts_df is a DataFrame, even if empty.

@@ -15,14 +15,100 @@ DEFAULT_OMEGA_M = 0.31
 
 # Default MCMC Parameters
 DEFAULT_MCMC_N_DIM = 1
-DEFAULT_MCMC_N_WALKERS = 32
-DEFAULT_MCMC_N_STEPS = 6000
-DEFAULT_MCMC_BURNIN = 1000
+DEFAULT_MCMC_N_WALKERS = 16
+DEFAULT_MCMC_N_STEPS = 1000
+DEFAULT_MCMC_BURNIN = 100
 DEFAULT_MCMC_THIN_BY = 10
 DEFAULT_MCMC_INITIAL_H0_MEAN = 70.0
 DEFAULT_MCMC_INITIAL_H0_STD = 10.0
 DEFAULT_H0_PRIOR_MIN = 10.0 # km/s/Mpc
 DEFAULT_H0_PRIOR_MAX = 200.0 # km/s/Mpc
+
+class H0LogLikelihood:
+    def __init__(self, dL_gw_samples, host_galaxies_z, 
+                 sigma_v=DEFAULT_SIGMA_V_PEC, 
+                 c_val=DEFAULT_C_LIGHT, 
+                 omega_m_val=DEFAULT_OMEGA_M,
+                 h0_min=DEFAULT_H0_PRIOR_MIN,
+                 h0_max=DEFAULT_H0_PRIOR_MAX):
+        
+        if dL_gw_samples is None or len(dL_gw_samples) == 0:
+            raise ValueError("dL_gw_samples cannot be None or empty.")
+        if host_galaxies_z is None or len(host_galaxies_z) == 0:
+            raise ValueError("host_galaxies_z cannot be None or empty.")
+
+        self.dL_gw_samples = dL_gw_samples
+        # Ensure host_galaxies_z is a numpy array for broadcasting
+        self.z_values = np.asarray(host_galaxies_z)
+        if self.z_values.ndim == 0: # if it was a single scalar
+            self.z_values = np.array([self.z_values])
+        
+        self.sigma_v = sigma_v
+        self.c_val = c_val
+        self.omega_m_val = omega_m_val
+        self.h0_min = h0_min
+        self.h0_max = h0_max
+
+    def _lum_dist_model(self, z, H0_val):
+        cosmo = FlatLambdaCDM(H0=H0_val * u.km / u.s / u.Mpc, Om0=self.omega_m_val)
+        return cosmo.luminosity_distance(z).value
+
+    def __call__(self, theta):
+        H0 = theta[0]
+        logger.debug(f"H0LogLikelihood.__call__ with H0 = {H0}")
+
+        if not (self.h0_min <= H0 <= self.h0_max):
+            logger.debug(f"H0 = {H0} is outside prior range ({self.h0_min}, {self.h0_max}). Returning -inf.")
+            return -np.inf
+
+        try: 
+            model_d_for_hosts = self._lum_dist_model(self.z_values, H0)
+            logger.debug(f"model_d_for_hosts (first 5 if available): {model_d_for_hosts[:min(5, len(model_d_for_hosts))]}") 
+            if np.any(~np.isfinite(model_d_for_hosts)): 
+                logger.debug(f"Non-finite values in model_d_for_hosts for H0 = {H0}. Example: {model_d_for_hosts[~np.isfinite(model_d_for_hosts)][:min(5, len(model_d_for_hosts[~np.isfinite(model_d_for_hosts)]))]}") 
+                return -np.inf 
+        except Exception as e: 
+            logger.debug(f"EXCEPTION in _lum_dist_model for H0 = {H0}: {e}") 
+            return -np.inf 
+        
+        sigma_d_val_for_hosts = (model_d_for_hosts / self.c_val) * self.sigma_v
+        sigma_d_val_for_hosts = np.maximum(sigma_d_val_for_hosts, 1e-9) 
+        logger.debug(f"sigma_d_val_for_hosts (first 5 if available): {sigma_d_val_for_hosts[:min(5, len(sigma_d_val_for_hosts))]}") 
+        if np.any(~np.isfinite(sigma_d_val_for_hosts)): 
+            logger.debug(f"Non-finite values in sigma_d_val_for_hosts for H0 = {H0}.") 
+            return -np.inf
+
+        log_P_data_H0_zi_terms = np.zeros(len(self.z_values))
+
+        for i in range(len(self.z_values)):
+            current_model_d = model_d_for_hosts[i]
+            current_sigma_d = sigma_d_val_for_hosts[i]
+            try:
+                log_pdf_for_one_galaxy = norm.logpdf(
+                    self.dL_gw_samples,
+                    loc=current_model_d,
+                    scale=current_sigma_d
+                )
+            except Exception as e:
+                logger.debug(f"EXCEPTION in norm.logpdf for H0 = {H0}, galaxy_idx = {i}: {e}")
+                log_pdf_for_one_galaxy = np.full(len(self.dL_gw_samples), -np.inf)
+
+            if np.any(~np.isfinite(log_pdf_for_one_galaxy)):
+                log_P_data_H0_zi_terms[i] = -np.inf
+            else:
+                log_P_data_H0_zi_terms[i] = np.logaddexp.reduce(log_pdf_for_one_galaxy) - np.log(len(self.dL_gw_samples))
+        
+        log_sum_over_gw_samples = log_P_data_H0_zi_terms
+        logger.debug(f"log_sum_over_gw_samples (iterative per galaxy) shape: {log_sum_over_gw_samples.shape}, any non-finite: {np.any(~np.isfinite(log_sum_over_gw_samples))}")
+
+        total_log_likelihood = np.logaddexp.reduce(log_sum_over_gw_samples) - np.log(len(self.z_values))
+        logger.debug(f"total_log_likelihood = {total_log_likelihood}")
+        
+        if not np.isfinite(total_log_likelihood):
+            logger.debug(f"total_log_likelihood is not finite ({total_log_likelihood}) for H0 = {H0}. Returning -inf.")
+            return -np.inf 
+            
+        return total_log_likelihood
 
 def get_log_likelihood_h0(
     dL_gw_samples, 
@@ -34,7 +120,8 @@ def get_log_likelihood_h0(
     h0_max=DEFAULT_H0_PRIOR_MAX
 ):
     """
-    Returns the log likelihood function for H0, marginalized over GW samples and host galaxies.
+    Returns an instance of the H0LogLikelihood class, which is a callable
+    log likelihood function for H0, marginalized over GW samples and host galaxies.
 
     Args:
         dL_gw_samples (np.array): Luminosity distance samples from GW event (N_samples,).
@@ -46,111 +133,13 @@ def get_log_likelihood_h0(
         h0_max (float): Maximum value for H0 prior.
 
     Returns:
-        function: A log likelihood function `log_likelihood(theta)` where theta is [H0].
+        H0LogLikelihood: An instance of the H0LogLikelihood class.
     """
-    if dL_gw_samples is None or len(dL_gw_samples) == 0:
-        raise ValueError("dL_gw_samples cannot be None or empty.")
-    if host_galaxies_z is None or len(host_galaxies_z) == 0:
-        raise ValueError("host_galaxies_z cannot be None or empty.")
-
-    # Ensure host_galaxies_z is a numpy array for broadcasting
-    z_values = np.asarray(host_galaxies_z)
-    if z_values.ndim == 0: # if it was a single scalar
-        z_values = np.array([z_values])
-
-    def lum_dist_model(z, H0_val):
-        cosmo = FlatLambdaCDM(H0=H0_val * u.km / u.s / u.Mpc, Om0=omega_m_val)
-        return cosmo.luminosity_distance(z).value # Returns array if z is array
-
-    def log_likelihood(theta):
-        H0 = theta[0]
-        logger.debug(f"log_likelihood called with H0 = {H0}")
-
-        if not (h0_min <= H0 <= h0_max):
-            logger.debug(f"H0 = {H0} is outside prior range ({h0_min}, {h0_max}). Returning -inf.")
-            return -np.inf
-
-        # Calculate model luminosity distances for all host galaxies at this H0
-        # model_d will be an array of shape (N_hosts,)
-        try: 
-            model_d_for_hosts = lum_dist_model(z_values, H0)
-            logger.debug(f"model_d_for_hosts (first 5 if available): {model_d_for_hosts[:min(5, len(model_d_for_hosts))]}") 
-            if np.any(~np.isfinite(model_d_for_hosts)): 
-                logger.debug(f"Non-finite values in model_d_for_hosts for H0 = {H0}. Example: {model_d_for_hosts[~np.isfinite(model_d_for_hosts)][:min(5, len(model_d_for_hosts[~np.isfinite(model_d_for_hosts)]))]}") 
-                return -np.inf 
-        except Exception as e: 
-            logger.debug(f"EXCEPTION in lum_dist_model for H0 = {H0}: {e}") 
-            return -np.inf 
-        
-        # Calculate sigma_d for each host based on its model_d
-        # sigma_d_val_for_hosts will be array of shape (N_hosts,)
-        sigma_d_val_for_hosts = (model_d_for_hosts / c_val) * sigma_v
-        # Prevent sigma_d from being too small or zero to avoid numerical issues
-        sigma_d_val_for_hosts = np.maximum(sigma_d_val_for_hosts, 1e-9) 
-        logger.debug(f"sigma_d_val_for_hosts (first 5 if available): {sigma_d_val_for_hosts[:min(5, len(sigma_d_val_for_hosts))]}") 
-        if np.any(~np.isfinite(sigma_d_val_for_hosts)): 
-            logger.debug(f"Non-finite values in sigma_d_val_for_hosts for H0 = {H0}.") 
-            return -np.inf
-
-        # --- Memory-Efficient Likelihood Calculation --- 
-        # Iterate over host galaxies to avoid creating a huge (N_samples, N_hosts) matrix for log_pdf_values
-
-        log_P_data_H0_zi_terms = np.zeros(len(z_values)) # To store log P(data|H0,z_i) for each host
-
-        # dL_gw_samples is shape (N_samples,)
-        # model_d_for_hosts is shape (N_hosts,)
-        # sigma_d_val_for_hosts is shape (N_hosts,)
-
-        for i in range(len(z_values)): # Loop over each host galaxy
-            # For the i-th galaxy:
-            current_model_d = model_d_for_hosts[i]    # scalar
-            current_sigma_d = sigma_d_val_for_hosts[i]  # scalar
-
-            # Calculate log P(dL_s | H0, z_i) for all GW samples for THIS galaxy i
-            # log_pdf_for_one_galaxy will be of shape (N_samples,)
-            try:
-                log_pdf_for_one_galaxy = norm.logpdf(
-                    dL_gw_samples,          # Shape (N_samples,)
-                    loc=current_model_d,    # Scalar loc
-                    scale=current_sigma_d   # Scalar scale
-                )
-            except Exception as e:
-                logger.debug(f"EXCEPTION in norm.logpdf for H0 = {H0}, galaxy_idx = {i}: {e}")
-                log_pdf_for_one_galaxy = np.full(len(dL_gw_samples), -np.inf) # Penalize this galaxy if error
-
-            if np.any(~np.isfinite(log_pdf_for_one_galaxy)):
-                # This might happen if current_sigma_d is zero or nan, or current_model_d is problematic
-                # logger.debug(f"Non-finite log_pdf_for_one_galaxy for H0={H0}, galaxy_idx={i}. model_d={current_model_d}, sigma_d={current_sigma_d}")
-                # Set to a very low value, or handle as error for the galaxy
-                log_P_data_H0_zi_terms[i] = -np.inf # Or some very large negative number if all samples are non-finite for this galaxy
-            else:
-                # Marginalize over GW samples for THIS galaxy i
-                # log P(data | H0, z_i) = logsumexp(log P(dL_s | H0, z_i)) - log(N_samples)
-                log_P_data_H0_zi_terms[i] = np.logaddexp.reduce(log_pdf_for_one_galaxy) - np.log(len(dL_gw_samples))
-            
-            # Optional: progress print if N_hosts is very large and this loop takes time
-            # if i > 0 and i % 10000 == 0 and len(z_values) > 20000: # Print every 10000 galaxies if many
-            #    logger.debug(f"H0={H0:.2f}, processed likelihood for galaxy {i}/{len(z_values)}")
-        
-        # log_sum_over_gw_samples is now log_P_data_H0_zi_terms, which is shape (N_hosts,)
-        log_sum_over_gw_samples = log_P_data_H0_zi_terms
-        logger.debug(f"log_sum_over_gw_samples (iterative per galaxy) shape: {log_sum_over_gw_samples.shape}, any non-finite: {np.any(~np.isfinite(log_sum_over_gw_samples))}")
-
-        # Marginalize over galaxies (sum probabilities for a given H0):
-        # log P(data | H0) = log [ (1/N_hosts) * sum_i P(data | H0, z_i) ]
-        # This is equivalent to logsumexp(log P(data | H0, z_i)) - log(N_hosts)
-        # This assumes a uniform prior over the candidate host galaxies.
-        total_log_likelihood = np.logaddexp.reduce(log_sum_over_gw_samples) - np.log(len(z_values))
-        logger.debug(f"total_log_likelihood = {total_log_likelihood}")
-        
-        if not np.isfinite(total_log_likelihood):
-            # Helps catch numerical issues (e.g., if all log_pdf_values were -inf)
-            logger.debug(f"total_log_likelihood is not finite ({total_log_likelihood}) for H0 = {H0}. Returning -inf.")
-            return -np.inf 
-            
-        return total_log_likelihood
-
-    return log_likelihood
+    return H0LogLikelihood(
+        dL_gw_samples, host_galaxies_z, 
+        sigma_v, c_val, omega_m_val, 
+        h0_min, h0_max
+    )
 
 def run_mcmc_h0(
     log_likelihood_func, 
@@ -159,7 +148,8 @@ def run_mcmc_h0(
     n_dim=DEFAULT_MCMC_N_DIM, 
     initial_h0_mean=DEFAULT_MCMC_INITIAL_H0_MEAN, 
     initial_h0_std=DEFAULT_MCMC_INITIAL_H0_STD, 
-    n_steps=DEFAULT_MCMC_N_STEPS
+    n_steps=DEFAULT_MCMC_N_STEPS,
+    pool=None  # Add new pool parameter
 ):
     """
     Runs the MCMC sampler for H0.
@@ -172,6 +162,7 @@ def run_mcmc_h0(
         initial_h0_mean (float): Mean for initializing walker positions.
         initial_h0_std (float): Standard deviation for initializing walker positions.
         n_steps (int): Number of MCMC steps.
+        pool (object, optional): A pool object for parallelization (e.g., from multiprocessing or emcee.interruptible_pool).
 
     Returns:
         emcee.EnsembleSampler: The MCMC sampler object after running, or None on failure.
@@ -184,7 +175,13 @@ def run_mcmc_h0(
     if walkers0.ndim == 1:
         walkers0 = walkers0[:, np.newaxis]
         
-    sampler = emcee.EnsembleSampler(n_walkers, n_dim, log_likelihood_func, moves=emcee.moves.StretchMove())
+    sampler = emcee.EnsembleSampler(
+        n_walkers, 
+        n_dim, 
+        log_likelihood_func, 
+        moves=emcee.moves.StretchMove(),
+        pool=pool  # Pass the pool to the sampler
+    )
     
     try:
         sampler.run_mcmc(walkers0, n_steps, progress=True)
