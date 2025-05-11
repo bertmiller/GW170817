@@ -6,6 +6,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# --- Data Directory ---
+DATA_DIR = "data"
+
 # --- Catalog Configurations ---
 CATALOG_CONFIGS = {
     'glade+': {
@@ -48,6 +51,7 @@ DEFAULT_GALAXY_CORRECTIONS = {
 def download_and_load_galaxy_catalog(catalog_type='glade+'):
     """
     Downloads (if not present) and loads the specified galaxy catalog using configurations.
+    Files will be stored in and read from the DATA_DIR.
 
     Args:
         catalog_type (str): Type of catalog to load. Keys from CATALOG_CONFIGS (e.g., 'glade+', 'glade24').
@@ -62,25 +66,29 @@ def download_and_load_galaxy_catalog(catalog_type='glade+'):
         return pd.DataFrame()
 
     url = config['url']
-    filename = config['filename']
+    base_filename = config['filename'] # Renamed from filename to base_filename
     use_cols = config['use_cols']
     col_names = config['col_names']
     na_vals = config['na_vals']
     catalog_name_print = config['display_name']
 
-    if not os.path.exists(filename):
-        logger.info(f"Downloading {catalog_name_print} catalogue ({url}) …")
+    # Ensure data directory exists
+    os.makedirs(DATA_DIR, exist_ok=True)
+    target_filepath = os.path.join(DATA_DIR, base_filename) # Path inside DATA_DIR
+
+    if not os.path.exists(target_filepath):
+        logger.info(f"Downloading {catalog_name_print} catalogue ({url}) to {target_filepath} …")
         # Note: GLADE+ is ~6GB, GLADE 2.4 is ~450MB. Download message is generic.
         try:
-            urllib.request.urlretrieve(url, filename)
+            urllib.request.urlretrieve(url, target_filepath)
         except Exception as e:
-            logger.error(f"❌ Error downloading {catalog_name_print} catalog: {e}")
+            logger.error(f"❌ Error downloading {catalog_name_print} catalog to {target_filepath}: {e}")
             return pd.DataFrame()
 
-    logger.info(f"Reading {catalog_name_print} from {filename}...")
+    logger.info(f"Reading {catalog_name_print} from {target_filepath}...")
     try:
         glade_df = pd.read_csv(
-            filename,
+            target_filepath,
             sep=r"\s+",
             usecols=use_cols,
             names=col_names,
@@ -227,19 +235,11 @@ if __name__ == '__main__':
     logger.info("--- Testing galaxy_catalog_handler.py ---")
 
     # 1. Test download and load for GLADE+
-    test_glade_plus_file = "GLADE+_test.txt"
-    if os.path.exists(test_glade_plus_file):
-        os.remove(test_glade_plus_file)
-
     logger.info("\n--- Testing GLADE+ ---   ")
     raw_galaxies_plus = download_and_load_galaxy_catalog(catalog_type='glade+')
     # To avoid downloading the large GLADE+ file during routine tests, we can mock or use a small subset.
     # For this example, we'll proceed assuming it might download or use an existing small test file.
-    # IF you want to run full test with GLADE+ download, ensure 'test_glade_plus_file' is GLADE_PLUS_FILE
-    # and the download_and_load_galaxy_catalog call above doesn't use a custom filename for this part.
-    # For now, let's assume it's using the real GLADE_PLUS_FILE defined globally if test_glade_plus_file isn't handled specifically inside.
-    # The function was: download_and_load_galaxy_catalog(filename=test_glade_file)
-    # It is now: download_and_load_galaxy_catalog(catalog_type='glade+') which uses GLADE_PLUS_FILE by default.
+    # The function now uses DATA_DIR/CATALOG_CONFIGS['glade+']['filename'] by default.
 
     if not raw_galaxies_plus.empty:
         logger.info(f"Successfully loaded {len(raw_galaxies_plus)} raw galaxies from GLADE+.")
@@ -257,18 +257,8 @@ if __name__ == '__main__':
         logger.error("Failed to load raw galaxies from GLADE+. Check connection or file.")
 
     # 2. Test download and load for GLADE 2.4
-    test_glade24_file = "GLADE_2.4_test.txt"
-    if os.path.exists(test_glade24_file):
-        os.remove(test_glade24_file)
-
     logger.info("\n--- Testing GLADE 2.4 ---    ")
-    # To make the test use the temporary file, we'd need to pass filename to download_and_load_galaxy_catalog
-    # The function signature was changed. We need to decide how to handle test file names.
-    # For now, the test will attempt to use the *actual* default filenames (GLADE_PLUS_FILE, GLADE24_FILE)
-    # This means if they exist, they are used, otherwise downloaded.
-    # If you want isolated tests, the download_and_load_galaxy_catalog would need 'filename' arg back
-    # or the test files need to be named exactly GLADE_PLUS_FILE / GLADE24_FILE.
-    # Let's assume for testing, we're okay with it using the actual files or downloading them.
+    # The function now uses DATA_DIR/CATALOG_CONFIGS['glade24']['filename'] by default.
 
     raw_galaxies_24 = download_and_load_galaxy_catalog(catalog_type='glade24')
 
@@ -317,12 +307,16 @@ if __name__ == '__main__':
     else:
         logger.error("Failed to load raw galaxies from GLADE 2.4. Check connection or file.")
 
-    # Clean up test files - this part is now problematic as we are not using specific test file names in the load function.
-    # if os.path.exists(test_glade_plus_file):
-    #     os.remove(test_glade_plus_file)
-    #     logger.info(f"Removed test GLADE+ file: {test_glade_plus_file}")
-    # if os.path.exists(test_glade24_file):
-    #     os.remove(test_glade24_file)
-    #     logger.info(f"Removed test GLADE 2.4 file: {test_glade24_file}")
+    # Clean up test files downloaded by the functions
+    logger.info("\n--- Cleaning up downloaded test files ---")
+    glade_plus_actual_file = os.path.join(DATA_DIR, CATALOG_CONFIGS['glade+']['filename'])
+    if os.path.exists(glade_plus_actual_file):
+        os.remove(glade_plus_actual_file)
+        logger.info(f"Removed test GLADE+ file: {glade_plus_actual_file}")
+
+    glade24_actual_file = os.path.join(DATA_DIR, CATALOG_CONFIGS['glade24']['filename'])
+    if os.path.exists(glade24_actual_file):
+        os.remove(glade24_actual_file)
+        logger.info(f"Removed test GLADE 2.4 file: {glade24_actual_file}")
 
     logger.info("\n--- Finished testing galaxy_catalog_handler.py ---") 
