@@ -76,7 +76,7 @@ from plot_utils import plot_3d_localization_with_galaxies
 # -------------------------------------------------------------------
 # Configuration specific to this visualization script
 # -------------------------------------------------------------------
-DEFAULT_EVENT_NAME_VIZ = "GW170818"
+DEFAULT_EVENT_NAME_VIZ = "GW170817"
 VIZ_CATALOG_TYPE = 'glade+' # Specify catalog type: 'glade+' or 'glade24'
 
 # HEALPix Sky Map parameters for this script
@@ -496,32 +496,53 @@ def animate_mean_log_prob(
 
     try:
         log_prob = sampler.get_log_prob()
+        logger.debug(f"Log probability shape: {log_prob.shape if log_prob is not None else 'None'}")
+        if log_prob is None or log_prob.size == 0:
+            logger.error(f"❌ No log probabilities available for {event_name}")
+            return None
     except Exception as e:
         logger.error(f"❌ Error getting log probabilities for {event_name}: {e}")
-        return
+        return None
 
+    # Validate log_prob shape and adjust n_steps if needed
     if log_prob.shape[0] != n_total_steps:
         n_steps = log_prob.shape[0]
-        logger.debug(
-            f"n_total_steps ({n_total_steps}) mismatch with sampler ({n_steps}), using sampler count"
+        logger.info(
+            f"Adjusting n_steps from {n_total_steps} to {n_steps} based on actual chain length"
         )
     else:
         n_steps = n_total_steps
 
-    mean_log_prob = np.mean(log_prob, axis=1)
+    # Calculate mean log probability
+    try:
+        mean_log_prob = np.mean(log_prob, axis=1)
+        logger.debug(f"Mean log probability shape: {mean_log_prob.shape}")
+        if not np.any(np.isfinite(mean_log_prob)):
+            logger.error(f"❌ No finite values in mean log probability for {event_name}")
+            return None
+    except Exception as e:
+        logger.error(f"❌ Error calculating mean log probability: {e}")
+        return None
 
+    # Create figure and axis
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.set_xlabel("Step Number")
     ax.set_ylabel("Mean Log Posterior Probability")
     ax.set_title(f"Evolution of Mean Log Probability - {event_name}")
 
-    y_padding = 0.05 * (mean_log_prob.max() - mean_log_prob.min() or 1.0)
+    # Set plot limits with padding
+    y_min = np.min(mean_log_prob[np.isfinite(mean_log_prob)])
+    y_max = np.max(mean_log_prob[np.isfinite(mean_log_prob)])
+    y_padding = 0.05 * (y_max - y_min) if y_max > y_min else 0.1
     ax.set_xlim(0, n_steps)
-    ax.set_ylim(mean_log_prob.min() - y_padding, mean_log_prob.max() + y_padding)
+    ax.set_ylim(y_min - y_padding, y_max + y_padding)
 
+    # Add burn-in line if specified
     if burnin_steps is not None and 0 < burnin_steps < n_steps:
-        ax.axvline(burnin_steps, ls="--", c="red")
+        ax.axvline(burnin_steps, ls="--", c="red", label=f"Burn-in ({burnin_steps})")
+        ax.legend()
 
+    # Initialize plot elements
     line, = ax.plot([], [], lw=1.5, color="tab:blue")
     point, = ax.plot([], [], "o", color="tab:orange")
     step_text = ax.text(
@@ -535,9 +556,18 @@ def animate_mean_log_prob(
         bbox=dict(boxstyle="round,pad=0.3", fc="w", alpha=0.7),
     )
 
+    # Calculate steps to plot
     steps = np.arange(0, n_steps, max(1, plot_interval))
+    logger.debug(f"Number of steps to plot: {len(steps)}")
+    
+    if len(steps) == 0:
+        logger.error(f"❌ No steps to plot for {event_name} with plot_interval={plot_interval}")
+        return None
+    
+    # Ensure we include the final step
     if steps[-1] != n_steps - 1:
         steps = np.append(steps, n_steps - 1)
+        logger.debug(f"Added final step. Total steps to plot: {len(steps)}")
 
     def init():
         line.set_data([], [])
@@ -546,33 +576,59 @@ def animate_mean_log_prob(
         return line, point, step_text
 
     def update(frame_idx):
-        step = steps[frame_idx]
-        x_data = np.arange(0, step + 1)
-        y_data = mean_log_prob[: step + 1]
-        line.set_data(x_data, y_data)
-        point.set_data(step, mean_log_prob[step])
-        step_text.set_text(f"Step: {step}\nMean LogProb: {mean_log_prob[step]:.2f}")
-        return line, point, step_text
+        try:
+            if frame_idx >= len(steps):
+                logger.error(f"❌ Frame index {frame_idx} out of range for {len(steps)} steps")
+                return line, point, step_text
+                
+            step = steps[frame_idx]
+            if step >= len(mean_log_prob):
+                logger.error(f"❌ Step {step} out of range for mean_log_prob length {len(mean_log_prob)}")
+                return line, point, step_text
+                
+            # Create sequences for plotting
+            x_data = np.arange(0, step + 1)
+            y_data = mean_log_prob[: step + 1]
+            
+            # Ensure data is in the correct format for set_data
+            line.set_data(x_data.tolist(), y_data.tolist())
+            point.set_data([step], [mean_log_prob[step]])  # Point data must be lists/arrays
+            step_text.set_text(f"Step: {step}\nMean LogProb: {mean_log_prob[step]:.2f}")
+            return line, point, step_text
+        except Exception as e:
+            logger.error(f"❌ Error in update function for frame {frame_idx}: {e}")
+            return line, point, step_text
 
-    anim = FuncAnimation(
-        fig,
-        update,
-        frames=len(steps),
-        init_func=init,
-        blit=True,
-        interval=max(20, 1000 // fps),
-    )
-
-    os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, output_filename_template.format(event_name=event_name))
+    # Create animation
     try:
+        logger.debug(f"Creating animation with {len(steps)} frames")
+        anim = FuncAnimation(
+            fig,
+            update,
+            frames=len(steps),
+            init_func=init,
+            blit=True,
+            interval=max(20, 1000 // fps),
+        )
+
+        # Ensure output directory exists
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(output_dir, output_filename_template.format(event_name=event_name))
+        
+        # Save animation
+        logger.debug(f"Saving animation to {output_path}")
         anim.save(output_path, writer="pillow", fps=fps)
-        logger.info(f"Mean log probability animation saved to {output_path}")
+        logger.info(f"✅ Mean log probability animation saved to {output_path}")
+        return output_path
+        
     except Exception as e:
-        logger.error(f"❌ Error saving mean log probability animation for {event_name}: {e}")
+        logger.error(f"❌ Error creating/saving animation for {event_name}: {e}")
+        logger.error(f"  Steps array length: {len(steps)}")
+        logger.error(f"  Mean log probability length: {len(mean_log_prob)}")
+        logger.error(f"  n_steps: {n_steps}")
+        return None
     finally:
         plt.close(fig)
-    return output_path
 
 # -------------------------------------------------------------------
 # Main script execution for viz.py
