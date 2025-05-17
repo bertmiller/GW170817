@@ -3,16 +3,17 @@ import sys
 import urllib.request
 import pandas as pd
 import logging
+from gwsiren import CONFIG
 
 logger = logging.getLogger(__name__)
 
-# --- Data Directory ---
-DATA_DIR = "data"
+# --- Data Directory from central config ---
+DATA_DIR = CONFIG.catalog["data_dir"]
 
 # --- Catalog Configurations ---
 CATALOG_CONFIGS = {
     'glade+': {
-        'url': "http://elysium.elte.hu/~dalyag/GLADE+.txt",
+        'url': CONFIG.catalog['glade_plus_url'],
         'filename': "GLADE+.txt",
         'use_cols': [1, 8, 9, 27],  # PGC(col 2), RA(col 9), Dec(col 10), z_helio(col 28) -> 0-indexed
         'col_names': ['PGC', 'ra', 'dec', 'z'], # Standardized names
@@ -20,7 +21,7 @@ CATALOG_CONFIGS = {
         'display_name': "GLADE+"
     },
     'glade24': {
-        'url': "https://glade.elte.hu/GLADE-2.4.txt",
+        'url': CONFIG.catalog['glade24_url'],
         'filename': "GLADE_2.4.txt",
         'use_cols': [0, 6, 7, 15],  # PGC, RA, Dec, z for GLADE 2.4
         'col_names': ['PGC', 'ra', 'dec', 'z'], # Standardized names

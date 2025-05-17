@@ -8,24 +8,25 @@ import logging
 import cProfile
 import pstats
 import io
+from gwsiren import CONFIG
 
 logger = logging.getLogger(__name__)
 
 # Default Cosmological Parameters for Likelihood
-DEFAULT_SIGMA_V_PEC = 250.0  # km/s, peculiar velocity uncertainty
-DEFAULT_C_LIGHT = 299792.458 # km/s
-DEFAULT_OMEGA_M = 0.31
+DEFAULT_SIGMA_V_PEC = CONFIG.cosmology["sigma_v_pec"]  # km/s, peculiar velocity uncertainty
+DEFAULT_C_LIGHT = CONFIG.cosmology["c_light"]
+DEFAULT_OMEGA_M = CONFIG.cosmology["omega_m"]
 
 # Default MCMC Parameters
 DEFAULT_MCMC_N_DIM = 1
-DEFAULT_MCMC_N_WALKERS = 14
-DEFAULT_MCMC_N_STEPS = 1000
-DEFAULT_MCMC_BURNIN = 200
-DEFAULT_MCMC_THIN_BY = 10
+DEFAULT_MCMC_N_WALKERS = CONFIG.mcmc["walkers"]
+DEFAULT_MCMC_N_STEPS = CONFIG.mcmc["steps"]
+DEFAULT_MCMC_BURNIN = CONFIG.mcmc["burnin"]
+DEFAULT_MCMC_THIN_BY = CONFIG.mcmc["thin_by"]
 DEFAULT_MCMC_INITIAL_H0_MEAN = 70.0
 DEFAULT_MCMC_INITIAL_H0_STD = 10.0
-DEFAULT_H0_PRIOR_MIN = 10.0 # km/s/Mpc
-DEFAULT_H0_PRIOR_MAX = 200.0 # km/s/Mpc
+DEFAULT_H0_PRIOR_MIN = CONFIG.mcmc["prior_h0_min"]  # km/s/Mpc
+DEFAULT_H0_PRIOR_MAX = CONFIG.mcmc["prior_h0_max"]  # km/s/Mpc
 
 class H0LogLikelihood:
     def __init__(self, dL_gw_samples, host_galaxies_z, 
