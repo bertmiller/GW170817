@@ -3,6 +3,7 @@ import pandas as pd
 import healpy as hp
 from astropy.coordinates import SkyCoord
 from astropy import units as u
+from astropy.cosmology import FlatLambdaCDM, z_at_value
 import logging
 
 logger = logging.getLogger(__name__)
@@ -12,6 +13,61 @@ DEFAULT_NSIDE_SKYMAP = 128
 DEFAULT_PROB_THRESHOLD_CDF = 0.90 # For 90% credible region
 # HOST_Z_MAX is intentionally not a global default here, as it's a crucial analysis choice
 # and should be explicitly passed to functions that use it.
+
+# Define some fiducial cosmological parameters for this estimation helper
+DEFAULT_FIDUCIAL_H0_FOR_Z_EST = 70.0  # km/s/Mpc
+DEFAULT_FIDUCIAL_OMEGA_M_FOR_Z_EST = 0.31
+
+def estimate_event_specific_z_max(
+    dL_gw_samples,
+    percentile_dL=95.0,
+    z_margin_factor=1.2,
+    min_z_max_val=0.01,
+    max_z_max_val=0.3, # This is an adaptive cap, GLADE cleaning has a broader z_max=2.0
+    fiducial_H0=DEFAULT_FIDUCIAL_H0_FOR_Z_EST,
+    fiducial_Omega_M=DEFAULT_FIDUCIAL_OMEGA_M_FOR_Z_EST
+):
+    """
+    Estimates a reasonable maximum redshift (host_z_max) for host galaxy searches
+    based on the GW event's luminosity distance posterior samples.
+    """
+    logger = logging.getLogger(__name__) # Get logger instance within function
+
+    if dL_gw_samples is None or len(dL_gw_samples) == 0:
+        logger.warning("⚠️ dL_gw_samples are empty or None. Cannot estimate z_max. Returning default max_z_max_val.")
+        return max_z_max_val
+
+    try:
+        dL_characteristic_mpc = np.percentile(dL_gw_samples, percentile_dL)
+        if not np.isfinite(dL_characteristic_mpc) or dL_characteristic_mpc <= 0:
+            logger.warning(f"⚠️ Characteristic dL ({dL_characteristic_mpc} Mpc) is not valid. Using a default high dL (1000 Mpc) for z estimation.")
+            dL_characteristic_mpc = 1000.0
+
+        fiducial_cosmo = FlatLambdaCDM(H0=fiducial_H0 * u.km / u.s / u.Mpc, Om0=fiducial_Omega_M)
+
+        try:
+            # z_at_value requires zmax if dL is large; zmax=5 should be sufficient for dL ~ few Gpc
+            z_characteristic = z_at_value(
+                fiducial_cosmo.luminosity_distance,
+                dL_characteristic_mpc * u.Mpc,
+                zmax=5.0, 
+                ztol=1e-4 
+            )
+        except Exception as e:
+            logger.warning(f"⚠️ Could not convert dL={dL_characteristic_mpc} Mpc to redshift: {e}. Using default max_z_max_val.")
+            return max_z_max_val
+            
+        estimated_z = z_characteristic * z_margin_factor
+        final_z_max = np.clip(estimated_z, min_z_max_val, max_z_max_val)
+        
+        logger.info(f"Estimated event-specific z_max: {final_z_max:.4f} "
+                    f"(based on {percentile_dL:.0f}th percentile dL={dL_characteristic_mpc:.1f} Mpc, "
+                    f"margin_factor={z_margin_factor}, initial_z_calc={z_characteristic:.4f})")
+        return float(final_z_max) # Ensure it returns a standard float
+
+    except Exception as e:
+        logger.exception(f"❌ Unexpected error in estimate_event_specific_z_max: {e}. Returning default max_z_max_val.")
+        return max_z_max_val
 
 def generate_sky_map_and_credible_region(ra_gw_samples, dec_gw_samples, nside=DEFAULT_NSIDE_SKYMAP, cdf_threshold=DEFAULT_PROB_THRESHOLD_CDF):
     """

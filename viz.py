@@ -54,6 +54,7 @@ from sky_analyzer import (
     generate_sky_map_and_credible_region,
     select_galaxies_in_sky_region,
     filter_galaxies_by_redshift,
+    estimate_event_specific_z_max,
     DEFAULT_NSIDE_SKYMAP as MODULE_DEFAULT_NSIDE_SKYMAP, # Avoid name clash if viz.py has its own NSIDE_SKYMAP
     DEFAULT_PROB_THRESHOLD_CDF as MODULE_DEFAULT_PROB_THRESHOLD_CDF
 )
@@ -70,12 +71,12 @@ from h0_mcmc_analyzer import (
 )
 
 # Import the new 3D plotting function
-from plot_utils import plot_3d_localization_with_galaxies
+from plot_utils import plot_3d_localization_with_galaxies, create_mean_log_prob_animation_gif
 
 # -------------------------------------------------------------------
 # Configuration specific to this visualization script
 # -------------------------------------------------------------------
-DEFAULT_EVENT_NAME_VIZ = "GW190814"
+DEFAULT_EVENT_NAME_VIZ = "GW170818"
 VIZ_CATALOG_TYPE = 'glade+' # Specify catalog type: 'glade+' or 'glade24'
 
 # HEALPix Sky Map parameters for this script
@@ -83,7 +84,7 @@ VIZ_NSIDE_SKYMAP = MODULE_DEFAULT_NSIDE_SKYMAP # Use default from sky_analyzer, 
 
 # Analysis specific for host selection for this script
 VIZ_PROB_THRESHOLD_CDF = MODULE_DEFAULT_PROB_THRESHOLD_CDF # Use default from sky_analyzer
-VIZ_HOST_Z_MAX = 0.05 # Final redshift cut for candidate hosts in visualizations
+VIZ_HOST_Z_MAX_FALLBACK = 0.05 
 
 # Galaxy corrections for this script
 VIZ_GALAXY_CORRECTIONS = DEFAULT_GALAXY_CORRECTIONS
@@ -537,6 +538,22 @@ def main():
         logger.info(f"Successfully extracted {len(ra_gw_samples)} RA/Dec GW samples.")
         if dL_gw_samples is not None: logger.info(f"  and {len(dL_gw_samples)} dL samples.")
 
+    # Estimate event-specific host_z_max
+    if dL_gw_samples is not None and len(dL_gw_samples) > 0:
+        logger.info("Estimating event-specific host_z_max based on dL_gw_samples...")
+        current_host_z_max_dynamic = estimate_event_specific_z_max(
+            dL_gw_samples,
+            percentile_dL=95.0,     
+            z_margin_factor=1.2,    
+            min_z_max_val=0.01,     
+            max_z_max_val=0.3       # Max z for this adaptive cut; GLADE cleaning has a broader one
+        )
+        logger.info(f"Using dynamically estimated host_z_max: {current_host_z_max_dynamic:.4f} for event {current_event_name}")
+    else:
+        # Fallback if dL_gw_samples are not available for some reason
+        current_host_z_max_dynamic = VIZ_HOST_Z_MAX_FALLBACK # Use the script's static default fallback
+        logger.warning(f"dL_gw_samples not available. Using static VIZ_HOST_Z_MAX_FALLBACK: {current_host_z_max_dynamic:.4f}")
+
     # 2. Generate basic sky probability map (if RA/Dec available)
     prob_map_gw_for_plots, sky_mask_for_plots = (None, None)
     if ra_gw_samples is not None and dec_gw_samples is not None:
@@ -574,17 +591,16 @@ def main():
         if not spatially_selected_galaxies_df.empty:
             # plot_redshift_distribution(
             #     spatially_selected_galaxies_df, current_event_name, 
-            #     "Spatially Selected (in C.R.)", host_z_max_cutoff=VIZ_HOST_Z_MAX
+            #     "Spatially Selected (in C.R.)", host_z_max_cutoff=current_host_z_max_dynamic
             # )
-            intermediate_hosts_df = filter_galaxies_by_redshift(spatially_selected_galaxies_df, VIZ_HOST_Z_MAX)
+            intermediate_hosts_df = filter_galaxies_by_redshift(spatially_selected_galaxies_df, current_host_z_max_dynamic)
             final_candidate_hosts_df = apply_specific_galaxy_corrections(
                 intermediate_hosts_df, current_event_name, VIZ_GALAXY_CORRECTIONS
             )
     else:
         logger.warning("Sky mask for CR not available or empty. Attempting selection from full catalog with z-cut for MCMC if needed.")
-        # Fallback: if no sky_mask, consider all cleaned galaxies up to z_max for MCMC (less optimal)
-        # This path is more for ensuring MCMC can run if dL samples exist but skymap failed badly.
-        intermediate_hosts_df = filter_galaxies_by_redshift(glade_cleaned_df, VIZ_HOST_Z_MAX)
+        # Fallback: if no sky_mask, consider all cleaned galaxies up to current_host_z_max_dynamic for MCMC
+        intermediate_hosts_df = filter_galaxies_by_redshift(glade_cleaned_df, current_host_z_max_dynamic)
         final_candidate_hosts_df = apply_specific_galaxy_corrections(
             intermediate_hosts_df, current_event_name, VIZ_GALAXY_CORRECTIONS
         )
@@ -595,7 +611,7 @@ def main():
         logger.info(f"Final number of candidate hosts for {current_event_name} for overlay & H0: {len(final_candidate_hosts_df)}")
         # plot_redshift_distribution(
         #     final_candidate_hosts_df, current_event_name, 
-        #     "Final Candidate Hosts (for MCMC/Overlay)", host_z_max_cutoff=VIZ_HOST_Z_MAX
+        #     "Final Candidate Hosts (for MCMC/Overlay)", host_z_max_cutoff=current_host_z_max_dynamic
         # )
         pass
 
@@ -609,7 +625,7 @@ def main():
         #     nside=VIZ_NSIDE_SKYMAP,
         #     event_name=current_event_name,
         #     cred_level_percent=VIZ_PROB_THRESHOLD_CDF * 100,
-        #     host_z_max=VIZ_HOST_Z_MAX
+        #     host_z_max=current_host_z_max_dynamic
         # )
         pass
     else:
@@ -664,6 +680,17 @@ def main():
                         event_id=current_event_name,
                         walker_idx=0,                   # Animate the first walker by default
                         plot_interval=max(1, VIZ_MCMC_N_STEPS // 100), # Aim for ~100 frames, ensure at least 1
+                        fps=15
+                    )
+
+                    # Create and save mean log probability animation GIF
+                    create_mean_log_prob_animation_gif(
+                        sampler=mcmc_sampler,
+                        event_name=current_event_name,
+                        n_total_steps=VIZ_MCMC_N_STEPS, # Total steps configured for MCMC
+                        burnin_steps=VIZ_MCMC_BURNIN,
+                        output_dir=OUTPUT_DIR,
+                        plot_interval=max(1, VIZ_MCMC_N_STEPS // 100), # Aim for ~100 frames
                         fps=15
                     )
                 else:

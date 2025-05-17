@@ -6,6 +6,7 @@ from astropy.cosmology import FlatLambdaCDM
 from astropy import units as u
 import logging
 import os # Added os module
+from matplotlib.animation import FuncAnimation # Added for GIF animation
 
 logger = logging.getLogger(__name__)
 
@@ -198,3 +199,131 @@ def plot_3d_localization_with_galaxies(
     plt.show(block=False)
     plt.pause(1) # Allow plot to render in non-blocking mode
     # Consider plt.close(fig) if generating many plots in a loop to save memory
+
+def create_mean_log_prob_animation_gif(
+    sampler,  # emcee.EnsembleSampler object
+    event_name: str,
+    n_total_steps: int, # Total steps the sampler ran for
+    output_dir: str = "output",
+    burnin_steps: int | None = None,
+    output_filename_template: str = "log_prob_animation_{event_name}.gif",
+    plot_interval: int = 10, # Animate every N-th step
+    fps: int = 15
+):
+    """
+    Creates a GIF animation of the mean log posterior probability over MCMC steps.
+
+    Args:
+        sampler: The emcee.EnsembleSampler object after run_mcmc.
+        event_name (str): Name of the GW event for titles and filenames.
+        n_total_steps (int): The total number of steps the sampler ran for.
+        output_dir (str, optional): Directory to save the output GIF. Defaults to "output".
+        burnin_steps (int, optional): If provided, a vertical line indicating burn-in.
+        output_filename_template (str, optional): Template for the output GIF filename.
+        plot_interval (int, optional): Interval for plotting frames. Defaults to 10.
+        fps (int, optional): Frames per second for the GIF. Defaults to 15.
+    """
+    logger.info(f"Generating mean log probability animation for {event_name}...")
+
+    try:
+        log_probs = sampler.get_log_prob()  # Shape: (n_steps, n_walkers)
+        if log_probs is None or log_probs.size == 0:
+            logger.error(f"❌ No log probability data found in sampler for event {event_name}.")
+            return
+        if log_probs.shape[0] != n_total_steps:
+            logger.warning(
+                f"⚠️ Sampler log_probs steps ({log_probs.shape[0]}) mismatch "
+                f"n_total_steps ({n_total_steps}). Using sampler's step count."
+            )
+            actual_n_steps = log_probs.shape[0]
+        else:
+            actual_n_steps = n_total_steps
+            
+        mean_log_prob = np.mean(log_probs, axis=1)
+    except Exception as e:
+        logger.error(f"❌ Error extracting log probability from sampler for {event_name}: {e}")
+        return
+
+    if mean_log_prob.size == 0:
+        logger.warning(f"⚠️ Mean log probability array is empty for {event_name}. Cannot create animation.")
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    # Determine y-axis limits with padding
+    min_lp = np.min(mean_log_prob)
+    max_lp = np.max(mean_log_prob)
+    padding_lp = (max_lp - min_lp) * 0.05 if (max_lp - min_lp) > 0 else 1.0 # Add padding, handle flat case
+    y_min_limit = min_lp - padding_lp
+    y_max_limit = max_lp + padding_lp
+
+    ax.set_xlim(0, actual_n_steps)
+    ax.set_ylim(y_min_limit, y_max_limit)
+    ax.set_xlabel("MCMC Step Number")
+    ax.set_ylabel("Mean Log Posterior Probability")
+    ax.set_title(f"Evolution of Mean Log Probability - {event_name}")
+    ax.grid(True, alpha=0.4)
+
+    if burnin_steps is not None and 0 < burnin_steps < actual_n_steps:
+        ax.axvline(burnin_steps, color='red', linestyle=':', linewidth=1.5, label=f'Burn-in Cutoff ({burnin_steps})')
+        ax.legend(loc='lower right')
+
+    line, = ax.plot([], [], lw=1.5, color='teal')
+    point, = ax.plot([], [], 'o', color='orangered', markersize=5)
+    step_text = ax.text(0.02, 0.05, '', transform=ax.transAxes, fontsize=9,
+                        verticalalignment='bottom',
+                        bbox=dict(boxstyle='round,pad=0.3', fc='lightyellow', alpha=0.7))
+
+    steps_to_animate_indices = np.arange(0, actual_n_steps, plot_interval)
+    if not steps_to_animate_indices.size or steps_to_animate_indices[-1] != actual_n_steps -1:
+        # Ensure the last step is always included if not perfectly divisible
+        if actual_n_steps > 0 :
+             steps_to_animate_indices = np.append(steps_to_animate_indices, actual_n_steps - 1)
+             steps_to_animate_indices = np.unique(steps_to_animate_indices) # Remove duplicates if any
+
+    if not steps_to_animate_indices.size:
+        logger.warning(f"⚠️ No frames to animate for mean log prob (event {event_name}) with plot_interval={plot_interval} and steps {actual_n_steps}.")
+        plt.close(fig)
+        return
+
+    def init_animation():
+        line.set_data([], [])
+        point.set_data([], [])
+        step_text.set_text('')
+        return line, point, step_text
+
+    def update_animation(frame_num_idx):
+        current_mcmc_step_to_show = steps_to_animate_indices[frame_num_idx]
+
+        # Data for the line trace up to the current step
+        x_data_trace = np.arange(0, current_mcmc_step_to_show + 1)
+        y_data_trace = mean_log_prob[:current_mcmc_step_to_show + 1]
+        line.set_data(x_data_trace, y_data_trace)
+
+        # Current point
+        current_lp_value = mean_log_prob[current_mcmc_step_to_show]
+        point.set_data([current_mcmc_step_to_show], [current_lp_value])
+
+        step_text.set_text(f'Step: {current_mcmc_step_to_show}\nMean LogProb: {current_lp_value:.2f}')
+        return line, point, step_text
+
+    num_animation_frames = len(steps_to_animate_indices)
+    anim_interval_ms = max(20, 1000 // fps)
+
+    ani = FuncAnimation(fig, update_animation, frames=num_animation_frames,
+                        init_func=init_animation, blit=True, interval=anim_interval_ms)
+
+    # Ensure output directory exists
+    os.makedirs(output_dir, exist_ok=True)
+    base_output_filename = output_filename_template.format(event_name=event_name)
+    full_output_path = os.path.join(output_dir, base_output_filename)
+
+    try:
+        logger.info(f"Attempting to save mean log probability animation to {full_output_path}...")
+        ani.save(full_output_path, writer='pillow', fps=fps)
+        logger.info(f"✅ Mean log probability animation saved: {full_output_path}")
+    except Exception as e:
+        logger.error(f"❌ Error saving mean log probability animation for {event_name}: {e}")
+        logger.error("  Ensure 'Pillow' is installed (pip install Pillow).")
+    finally:
+        plt.close(fig)
