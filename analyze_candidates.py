@@ -11,6 +11,7 @@ This script does not perform MCMC H0 estimation.
 import os
 import sys
 import logging
+from gwsiren import CONFIG
 import numpy as np
 import pandas as pd
 
@@ -30,9 +31,7 @@ try:
         generate_sky_map_and_credible_region,
         select_galaxies_in_sky_region,
         filter_galaxies_by_redshift,
-        estimate_event_specific_z_max,
-        DEFAULT_NSIDE_SKYMAP as MODULE_DEFAULT_NSIDE_SKYMAP,
-        DEFAULT_PROB_THRESHOLD_CDF as MODULE_DEFAULT_PROB_THRESHOLD_CDF
+        estimate_event_specific_z_max
     )
 except ImportError as e:
     print(f"Error importing project modules: {e}")
@@ -58,8 +57,8 @@ CANDIDATE_LIST = [
 
 OUTPUT_DIR = "output_candidate_analysis" # Define a specific output directory for this script
 VIZ_CATALOG_TYPE = 'glade+'
-VIZ_NSIDE_SKYMAP = MODULE_DEFAULT_NSIDE_SKYMAP
-VIZ_PROB_THRESHOLD_CDF = MODULE_DEFAULT_PROB_THRESHOLD_CDF
+VIZ_NSIDE_SKYMAP = CONFIG.skymap["default_nside"]
+VIZ_PROB_THRESHOLD_CDF = CONFIG.skymap["credible_level"]
 VIZ_HOST_Z_MAX_FALLBACK = 0.05
 VIZ_GALAXY_CORRECTIONS = DEFAULT_GALAXY_CORRECTIONS # Use defaults from galaxy_catalog_handler
 

@@ -22,6 +22,7 @@ import emcee # For MCMC
 from emcee.interruptible_pool import InterruptiblePool # For parallel MCMC
 import logging # Added logging
 import argparse # Added argparse
+from gwsiren import CONFIG
 
 # Get a logger for this module (configuration will be done in main)
 logger = logging.getLogger(__name__)
@@ -54,9 +55,7 @@ from sky_analyzer import (
     generate_sky_map_and_credible_region,
     select_galaxies_in_sky_region,
     filter_galaxies_by_redshift,
-    estimate_event_specific_z_max,
-    DEFAULT_NSIDE_SKYMAP as MODULE_DEFAULT_NSIDE_SKYMAP, # Avoid name clash if viz.py has its own NSIDE_SKYMAP
-    DEFAULT_PROB_THRESHOLD_CDF as MODULE_DEFAULT_PROB_THRESHOLD_CDF
+    estimate_event_specific_z_max
 )
 
 # H0 MCMC Analysis
@@ -80,10 +79,10 @@ DEFAULT_EVENT_NAME_VIZ = "GW170818"
 VIZ_CATALOG_TYPE = 'glade+' # Specify catalog type: 'glade+' or 'glade24'
 
 # HEALPix Sky Map parameters for this script
-VIZ_NSIDE_SKYMAP = MODULE_DEFAULT_NSIDE_SKYMAP # Use default from sky_analyzer, can be overridden
+VIZ_NSIDE_SKYMAP = CONFIG.skymap["default_nside"]
 
 # Analysis specific for host selection for this script
-VIZ_PROB_THRESHOLD_CDF = MODULE_DEFAULT_PROB_THRESHOLD_CDF # Use default from sky_analyzer
+VIZ_PROB_THRESHOLD_CDF = CONFIG.skymap["credible_level"]
 VIZ_HOST_Z_MAX_FALLBACK = 0.05 
 
 # Galaxy corrections for this script
