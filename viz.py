@@ -71,7 +71,7 @@ from h0_mcmc_analyzer import (
 )
 
 # Import the new 3D plotting function
-from plot_utils import plot_3d_localization_with_galaxies, create_mean_log_prob_animation_gif
+from plot_utils import plot_3d_localization_with_galaxies
 
 # -------------------------------------------------------------------
 # Configuration specific to this visualization script
@@ -481,6 +481,99 @@ def create_walker_animation_gif(sampler, n_steps, burnin_steps, event_id,
     finally:
         plt.close(fig) # Ensure figure is closed after saving or error
 
+def animate_mean_log_prob(
+    sampler,
+    event_name: str,
+    n_total_steps: int,
+    burnin_steps: int | None = None,
+    output_dir: str = OUTPUT_DIR,
+    output_filename_template: str = "log_prob_animation_{event_name}.gif",
+    plot_interval: int = 10,
+    fps: int = 20,
+):
+    """Create an animated GIF showing evolution of mean log posterior probability."""
+    logger.info(f"Generating mean log probability animation for {event_name}...")
+
+    try:
+        log_prob = sampler.get_log_prob()
+    except Exception as e:
+        logger.error(f"❌ Error getting log probabilities for {event_name}: {e}")
+        return
+
+    if log_prob.shape[0] != n_total_steps:
+        n_steps = log_prob.shape[0]
+        logger.debug(
+            f"n_total_steps ({n_total_steps}) mismatch with sampler ({n_steps}), using sampler count"
+        )
+    else:
+        n_steps = n_total_steps
+
+    mean_log_prob = np.mean(log_prob, axis=1)
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.set_xlabel("Step Number")
+    ax.set_ylabel("Mean Log Posterior Probability")
+    ax.set_title(f"Evolution of Mean Log Probability - {event_name}")
+
+    y_padding = 0.05 * (mean_log_prob.max() - mean_log_prob.min() or 1.0)
+    ax.set_xlim(0, n_steps)
+    ax.set_ylim(mean_log_prob.min() - y_padding, mean_log_prob.max() + y_padding)
+
+    if burnin_steps is not None and 0 < burnin_steps < n_steps:
+        ax.axvline(burnin_steps, ls="--", c="red")
+
+    line, = ax.plot([], [], lw=1.5, color="tab:blue")
+    point, = ax.plot([], [], "o", color="tab:orange")
+    step_text = ax.text(
+        0.02,
+        0.95,
+        "",
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=9,
+        bbox=dict(boxstyle="round,pad=0.3", fc="w", alpha=0.7),
+    )
+
+    steps = np.arange(0, n_steps, max(1, plot_interval))
+    if steps[-1] != n_steps - 1:
+        steps = np.append(steps, n_steps - 1)
+
+    def init():
+        line.set_data([], [])
+        point.set_data([], [])
+        step_text.set_text("")
+        return line, point, step_text
+
+    def update(frame_idx):
+        step = steps[frame_idx]
+        x_data = np.arange(0, step + 1)
+        y_data = mean_log_prob[: step + 1]
+        line.set_data(x_data, y_data)
+        point.set_data(step, mean_log_prob[step])
+        step_text.set_text(f"Step: {step}\nMean LogProb: {mean_log_prob[step]:.2f}")
+        return line, point, step_text
+
+    anim = FuncAnimation(
+        fig,
+        update,
+        frames=len(steps),
+        init_func=init,
+        blit=True,
+        interval=max(20, 1000 // fps),
+    )
+
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, output_filename_template.format(event_name=event_name))
+    try:
+        anim.save(output_path, writer="pillow", fps=fps)
+        logger.info(f"Mean log probability animation saved to {output_path}")
+    except Exception as e:
+        logger.error(f"❌ Error saving mean log probability animation for {event_name}: {e}")
+    finally:
+        plt.close(fig)
+    return output_path
+
 # -------------------------------------------------------------------
 # Main script execution for viz.py
 # -------------------------------------------------------------------
@@ -684,14 +777,14 @@ def main():
                     )
 
                     # Create and save mean log probability animation GIF
-                    create_mean_log_prob_animation_gif(
+                    animate_mean_log_prob(
                         sampler=mcmc_sampler,
                         event_name=current_event_name,
-                        n_total_steps=VIZ_MCMC_N_STEPS, # Total steps configured for MCMC
+                        n_total_steps=VIZ_MCMC_N_STEPS,
                         burnin_steps=VIZ_MCMC_BURNIN,
                         output_dir=OUTPUT_DIR,
-                        plot_interval=max(1, VIZ_MCMC_N_STEPS // 100), # Aim for ~100 frames
-                        fps=15
+                        plot_interval=max(1, VIZ_MCMC_N_STEPS // 100),
+                        fps=15,
                     )
                 else:
                     logger.error(f"Skipping MCMC post-processing for {current_event_name} because MCMC run failed or returned no sampler.")
