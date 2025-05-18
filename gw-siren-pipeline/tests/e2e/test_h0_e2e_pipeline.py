@@ -53,7 +53,8 @@ def test_h0_pipeline_e2e_workflow(mocker, tmp_path, capsys, caplog, mock_config)
         "ra": [30.05, 30.3],
         "dec": [-10.05, -9.95],
         "z": [0.01, 0.02],
-        "mass_proxy": [1.0, 2.0]  # Added mass_proxy column
+        "mass_proxy": [1.0, 2.0],  # Added mass_proxy column
+        "z_err": [0.001, 0.001],
     })
     mocker.patch.object(
         pipeline_mod,

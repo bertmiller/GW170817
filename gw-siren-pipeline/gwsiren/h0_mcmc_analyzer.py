@@ -1,6 +1,7 @@
 import numpy as np
 import sys
 from scipy.stats import norm
+from numpy.polynomial.hermite import hermgauss
 from scipy.special import logsumexp
 from astropy.cosmology import FlatLambdaCDM
 from astropy import units as u
@@ -40,6 +41,7 @@ class H0LogLikelihood:
         dL_gw_samples: Array of GW luminosity distance samples.
         host_galaxies_z: Redshifts of candidate host galaxies.
         host_galaxies_mass_proxy: Positive mass proxy values for the galaxies.
+        host_galaxies_z_err: Redshift uncertainties for the galaxies.
         sigma_v: Peculiar velocity dispersion in km/s.
         c_val: Speed of light in km/s.
         omega_m_val: Matter density parameter.
@@ -55,6 +57,7 @@ class H0LogLikelihood:
         dL_gw_samples,
         host_galaxies_z,
         host_galaxies_mass_proxy,
+        host_galaxies_z_err,
         sigma_v=DEFAULT_SIGMA_V_PEC,
         c_val=DEFAULT_C_LIGHT,
         omega_m_val=DEFAULT_OMEGA_M,
@@ -71,17 +74,24 @@ class H0LogLikelihood:
             raise ValueError("host_galaxies_z cannot be None or empty.")
         if host_galaxies_mass_proxy is None or len(host_galaxies_mass_proxy) == 0:
             raise ValueError("host_galaxies_mass_proxy cannot be None or empty.")
+        if host_galaxies_z_err is None or len(host_galaxies_z_err) == 0:
+            raise ValueError("host_galaxies_z_err cannot be None or empty.")
 
         self.dL_gw_samples = np.asarray(dL_gw_samples)
         # Ensure host_galaxies_z is a numpy array for broadcasting
         self.z_values = np.asarray(host_galaxies_z)
         self.mass_proxy_values = np.asarray(host_galaxies_mass_proxy, dtype=float)
+        self.z_err_values = np.asarray(host_galaxies_z_err, dtype=float)
         if self.z_values.ndim == 0: # if it was a single scalar
             self.z_values = np.array([self.z_values])
         if self.mass_proxy_values.ndim == 0:
             self.mass_proxy_values = np.array([self.mass_proxy_values])
+        if self.z_err_values.ndim == 0:
+            self.z_err_values = np.array([self.z_err_values])
         if len(self.mass_proxy_values) != len(self.z_values):
             raise ValueError("host_galaxies_mass_proxy and host_galaxies_z must have the same length")
+        if len(self.z_err_values) != len(self.z_values):
+            raise ValueError("host_galaxies_z_err and host_galaxies_z must have the same length")
         
         self.sigma_v = sigma_v
         self.c_val = c_val
@@ -99,6 +109,9 @@ class H0LogLikelihood:
         self._base_cosmo = FlatLambdaCDM(
             H0=1.0 * u.km / u.s / u.Mpc, Om0=self.omega_m_val
         )
+
+        self._n_quad_points = 5
+        self._quad_nodes, self._quad_weights = hermgauss(self._n_quad_points)
 
     def _lum_dist_model(self, z, H0_val):
         """Compute luminosity distance for ``z`` and ``H0_val``.
@@ -185,26 +198,58 @@ class H0LogLikelihood:
                 return -np.inf
 
         else:
-            # --- Current Memory-Efficient Loop ---
-            # logger.debug("Using memory-efficient loop path.")
+            # --- Memory-Efficient Loop with Redshift Marginalization ---
             log_P_data_H0_zi_terms = np.zeros(len(self.z_values))
             for i in range(len(self.z_values)):
-                current_model_d = model_d_for_hosts[i]
-                current_sigma_d = sigma_d_val_for_hosts[i]
-                try:
-                    log_pdf_for_one_galaxy = norm.logpdf(
-                        self.dL_gw_samples,
-                        loc=current_model_d,
-                        scale=current_sigma_d
-                    )
-                except Exception as e:
-                    # logger.debug(f"EXCEPTION in norm.logpdf (loop) for H0 = {H0}, galaxy_idx = {i}: {e}")
-                    log_pdf_for_one_galaxy = np.full(len(self.dL_gw_samples), -np.inf)
+                mu_z = self.z_values[i]
+                sigma_z = self.z_err_values[i]
 
-                if np.any(~np.isfinite(log_pdf_for_one_galaxy)):
-                    log_P_data_H0_zi_terms[i] = -np.inf
+                if sigma_z < 1e-4:
+                    current_model_d = model_d_for_hosts[i]
+                    current_sigma_d = sigma_d_val_for_hosts[i]
+                    try:
+                        log_pdf_for_one_galaxy = norm.logpdf(
+                            self.dL_gw_samples,
+                            loc=current_model_d,
+                            scale=current_sigma_d,
+                        )
+                    except Exception:
+                        log_pdf_for_one_galaxy = np.full(len(self.dL_gw_samples), -np.inf)
+
+                    if np.any(~np.isfinite(log_pdf_for_one_galaxy)):
+                        log_P_data_H0_zi_terms[i] = -np.inf
+                    else:
+                        log_P_data_H0_zi_terms[i] = (
+                            np.logaddexp.reduce(log_pdf_for_one_galaxy)
+                            - np.log(len(self.dL_gw_samples))
+                        )
+                    continue
+
+                integrated_prob = 0.0
+                for node, weight in zip(self._quad_nodes, self._quad_weights):
+                    z_j = mu_z + np.sqrt(2.0) * sigma_z * node
+                    if z_j <= 0:
+                        continue
+                    model_d = self._lum_dist_model(z_j, H0)
+                    sigma_d = max((model_d / self.c_val) * self.sigma_v, 1e-9)
+                    try:
+                        log_pdf = norm.logpdf(
+                            self.dL_gw_samples,
+                            loc=model_d,
+                            scale=sigma_d,
+                        )
+                    except Exception:
+                        continue
+                    if np.any(~np.isfinite(log_pdf)):
+                        continue
+                    P_event = np.exp(logsumexp(log_pdf) - np.log(len(self.dL_gw_samples)))
+                    integrated_prob += (weight / np.sqrt(np.pi)) * P_event
+
+                if integrated_prob > 0:
+                    log_P_data_H0_zi_terms[i] = np.log(integrated_prob)
                 else:
-                    log_P_data_H0_zi_terms[i] = np.logaddexp.reduce(log_pdf_for_one_galaxy) - np.log(len(self.dL_gw_samples))
+                    log_P_data_H0_zi_terms[i] = -np.inf
+
             log_sum_over_gw_samples = log_P_data_H0_zi_terms
             # logger.debug(f"log_sum_over_gw_samples (iterative per galaxy) shape: {log_sum_over_gw_samples.shape}, any non-finite: {np.any(~np.isfinite(log_sum_over_gw_samples))}")
 
@@ -238,6 +283,7 @@ def get_log_likelihood_h0(
     dL_gw_samples,
     host_galaxies_z,
     host_galaxies_mass_proxy,
+    host_galaxies_z_err,
     sigma_v=DEFAULT_SIGMA_V_PEC,
     c_val=DEFAULT_C_LIGHT,
     omega_m_val=DEFAULT_OMEGA_M,
@@ -254,6 +300,7 @@ def get_log_likelihood_h0(
         dL_gw_samples (np.array): Luminosity distance samples from GW event (N_samples,).
         host_galaxies_z (np.array): Redshifts of candidate host galaxies (N_hosts,).
         host_galaxies_mass_proxy (np.array): Positive mass proxy values for the galaxies.
+        host_galaxies_z_err (np.array): Redshift uncertainties for the galaxies.
         sigma_v (float): Peculiar velocity uncertainty (km/s).
         c_val (float): Speed of light (km/s).
         omega_m_val (float): Omega Matter for cosmological calculations.
@@ -299,6 +346,7 @@ def get_log_likelihood_h0(
         dL_gw_samples,
         host_galaxies_z,
         host_galaxies_mass_proxy,
+        host_galaxies_z_err,
         sigma_v,
         c_val,
         omega_m_val,
@@ -313,6 +361,7 @@ def get_log_likelihood_h0_vectorized(
     dL_gw_samples,
     host_galaxies_z,
     host_galaxies_mass_proxy,
+    host_galaxies_z_err,
     sigma_v=DEFAULT_SIGMA_V_PEC,
     c_val=DEFAULT_C_LIGHT,
     omega_m_val=DEFAULT_OMEGA_M,
@@ -325,6 +374,7 @@ def get_log_likelihood_h0_vectorized(
         dL_gw_samples,
         host_galaxies_z,
         host_galaxies_mass_proxy,
+        host_galaxies_z_err,
         sigma_v,
         c_val,
         omega_m_val,
