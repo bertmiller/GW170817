@@ -16,7 +16,7 @@ CATALOG_CONFIGS = {
         'url': CONFIG.catalog['glade_plus_url'],
         'filename': "GLADE+.txt",
         # PGC(col 2), RA(col 9), Dec(col 10), z_helio(col 28), placeholder mass proxy column
-        'use_cols': [1, 8, 9, 27, 24],
+        'use_cols': [1, 8, 9, 27, 35],
         'col_names': ['PGC', 'ra', 'dec', 'z', 'mass_proxy'],
         'na_vals': ['-99.0', '-999.0', '-9999.0', 'NaN', 'NAN', 'nan', 'NULL', 'null', '', 'N/A', 'n/a', 'None', '...', 'no_value'],
         'display_name': "GLADE+"
@@ -25,7 +25,7 @@ CATALOG_CONFIGS = {
         'url': CONFIG.catalog['glade24_url'],
         'filename': "GLADE_2.4.txt",
         # PGC, RA, Dec, z, placeholder mass proxy column
-        'use_cols': [0, 6, 7, 15, 24],
+        'use_cols': [0, 6, 7, 15, 35],
         'col_names': ['PGC', 'ra', 'dec', 'z', 'mass_proxy'],
         'na_vals': ['-99.0', '-999.0', '-9999.0', 'NaN', 'NAN', 'nan', 'NULL', 'null', '', 'N/A', 'n/a', 'None', '...', 'no_value'],
         'display_name': "GLADE 2.4"

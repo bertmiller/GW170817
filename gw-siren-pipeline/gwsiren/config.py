@@ -46,6 +46,7 @@ class Config:
     skymap: dict
     mcmc: dict
     cosmology: dict
+    data_fetcher: dict
 
 
 def load_config(path: str | pathlib.Path | None = None) -> Config:
