@@ -20,9 +20,9 @@ except ImportError:
     sys.exit("❌ Install dependencies first: pip install pesummary healpy emcee astropy pandas matplotlib scipy")
 
 # Remove the hardcoded defaults and use config values
-DEFAULT_CACHE_DIR_NAME = CONFIG.data_fetcher['cache_dir_name']
-DEFAULT_TIMEOUT = CONFIG.data_fetcher['timeout']
-MAX_RETRIES = CONFIG.data_fetcher['max_retries']
+DEFAULT_CACHE_DIR_NAME = "pesummary_cache"
+DEFAULT_TIMEOUT = 30
+MAX_RETRIES = 3
 
 def configure_astropy_cache(cache_dir_base=DEFAULT_CACHE_DIR_NAME):
     """

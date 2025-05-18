@@ -1,17 +1,23 @@
 import importlib
 from unittest.mock import MagicMock
+import os
+import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import sys
 import logging
 
 
 def test_h0_pipeline_e2e_workflow(mocker, tmp_path, capsys, caplog, mock_config):
     event_name = "MOCK_GW_EVENT"
 
+    # Add project root to Python path
+    project_root = Path(__file__).parent.parent.parent
+    sys.path.insert(0, str(project_root))
+
     # Import pipeline after config fixture patched CONFIG
-    pipeline = importlib.import_module("h0_e2e_pipeline")
+    pipeline = importlib.import_module("scripts.h0_e2e_pipeline")
 
     # Ensure pipeline uses temporary output directory
     mocker.patch.object(pipeline, "OUTPUT_DIR", str(tmp_path))
@@ -40,9 +46,13 @@ def test_h0_pipeline_e2e_workflow(mocker, tmp_path, capsys, caplog, mock_config)
     )
 
     # Mock galaxy catalog loading and processing
-    gal_df = pd.DataFrame(
-        {"PGC": [1, 2], "ra": [30.05, 30.3], "dec": [-10.05, -9.95], "z": [0.01, 0.02]}
-    )
+    gal_df = pd.DataFrame({
+        "PGC": [1, 2],
+        "ra": [30.05, 30.3],
+        "dec": [-10.05, -9.95],
+        "z": [0.01, 0.02],
+        "mass_proxy": [1.0, 2.0]  # Added mass_proxy column
+    })
     mocker.patch.object(
         pipeline,
         "download_and_load_galaxy_catalog",
@@ -70,7 +80,8 @@ def test_h0_pipeline_e2e_workflow(mocker, tmp_path, capsys, caplog, mock_config)
 
     # Mock MCMC run
     mock_sampler = MagicMock()
-    mock_chain = np.random.normal(70, 5, size=(40, 1))
+    # Create a mock chain with 2 dimensions (H0 and alpha)
+    mock_chain = np.random.normal(70, 5, size=(40, 2))  # Changed to 2 dimensions
     mock_sampler.get_chain.return_value = mock_chain
     mcmc_mock = mocker.patch.object(pipeline, "run_mcmc_h0", return_value=mock_sampler)
 
@@ -102,4 +113,4 @@ def test_h0_pipeline_e2e_workflow(mocker, tmp_path, capsys, caplog, mock_config)
     assert samples.size > 0
 
     captured = caplog.text
-    assert "H0 =" in captured
+    assert "H0 =" in captured 
