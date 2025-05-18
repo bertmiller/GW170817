@@ -84,6 +84,16 @@ def test_load_glade_plus_from_local_mock_file(mock_config, caplog, monkeypatch):
         # mass_proxy may be NaN for some rows, so just check dtype
         assert 'mass_proxy' in df.columns, "mass_proxy column should exist"
         assert pd.api.types.is_numeric_dtype(df['mass_proxy']), "mass_proxy should be numeric"
+        # verify expected dtypes were applied when reading
+        expected_dtype = {
+            'PGC': 'int32',
+            'ra': 'float32',
+            'dec': 'float32',
+            'z': 'float32',
+            'mass_proxy': 'float32',
+        }
+        for col, dtype in expected_dtype.items():
+            assert df[col].dtype == dtype
         log_step("All assertions passed")
         
     except Exception as e:
