@@ -46,7 +46,9 @@ def test_load_glade_plus_from_local_mock_file(mock_config, caplog, monkeypatch):
     
     # Use the actual test_GLADE+.txt file as the data source
     log_step("Copying test_GLADE+.txt to temp directory")
-    test_data_path = Path(__file__).parent / "test_GLADE+.txt"
+    test_data_path = Path(__file__).parent.absolute() / "test_GLADE+.txt"
+    if not test_data_path.exists():
+        raise FileNotFoundError(f"Test data file not found at {test_data_path}")
     target_file = temp_catalog_dir / "GLADE+.txt"
     shutil.copy(test_data_path, target_file)
     log_step(f"Copied {test_data_path} to {target_file}")
