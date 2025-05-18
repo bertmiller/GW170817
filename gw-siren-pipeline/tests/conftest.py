@@ -70,7 +70,7 @@ def mock_config(monkeypatch, tmp_path, project_root_dir):
     # Also patch CONFIG where it might be imported directly by modules at their top level.
     # Add other modules here if they also do `from gwsiren import CONFIG`
     modules_to_patch_config = [
-        "galaxy_catalog_handler",
+        "gwsiren.data.catalogs",
         "sky_analyzer",
         "h0_mcmc_analyzer",
         "new",

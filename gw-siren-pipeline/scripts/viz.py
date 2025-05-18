@@ -42,7 +42,7 @@ from gw_data_fetcher import fetch_candidate_data, configure_astropy_cache, DEFAU
 from event_data_extractor import extract_gw_event_parameters
 
 # Galaxy Catalog Handling
-from galaxy_catalog_handler import (
+from gwsiren.data.catalogs import (
     download_and_load_galaxy_catalog,
     clean_galaxy_catalog,
     apply_specific_galaxy_corrections,

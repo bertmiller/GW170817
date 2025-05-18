@@ -6,7 +6,7 @@ import pytest
 
 import gw_data_fetcher
 import event_data_extractor
-import galaxy_catalog_handler
+import gwsiren.data.catalogs as galaxy_catalog_handler
 import sky_analyzer
 
 
@@ -45,11 +45,11 @@ def test_successful_data_pipeline_flow(prevent_main_import, mocker, mock_config)
     )
     mock_clean_df = mock_raw_df.copy()
     mocker.patch(
-        "galaxy_catalog_handler.download_and_load_galaxy_catalog",
+        "gwsiren.data.catalogs.download_and_load_galaxy_catalog",
         return_value=mock_raw_df,
     )
     mocker.patch(
-        "galaxy_catalog_handler.clean_galaxy_catalog",
+        "gwsiren.data.catalogs.clean_galaxy_catalog",
         return_value=mock_clean_df,
     )
 
@@ -110,11 +110,11 @@ def test_pipeline_handles_failure_in_extraction(prevent_main_import, mocker, moc
         }
     )
     mocker.patch(
-        "galaxy_catalog_handler.download_and_load_galaxy_catalog",
+        "gwsiren.data.catalogs.download_and_load_galaxy_catalog",
         return_value=mock_raw_df,
     )
     mocker.patch(
-        "galaxy_catalog_handler.clean_galaxy_catalog",
+        "gwsiren.data.catalogs.clean_galaxy_catalog",
         return_value=mock_raw_df,
     )
     mocker.patch(

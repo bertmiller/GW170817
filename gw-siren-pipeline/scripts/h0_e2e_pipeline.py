@@ -27,7 +27,7 @@ from gw_data_fetcher import (
     DEFAULT_CACHE_DIR_NAME,
 )
 from event_data_extractor import extract_gw_event_parameters
-from galaxy_catalog_handler import (
+from gwsiren.data.catalogs import (
     download_and_load_galaxy_catalog,
     clean_galaxy_catalog,
     apply_specific_galaxy_corrections,
