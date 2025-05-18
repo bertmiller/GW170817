@@ -4,7 +4,7 @@ import healpy as hp
 import pytest
 from unittest.mock import MagicMock
 
-from sky_analyzer import (
+from gwsiren.sky_analyzer import (
     estimate_event_specific_z_max,
     generate_sky_map_and_credible_region,
     select_galaxies_in_sky_region,
@@ -18,7 +18,7 @@ from sky_analyzer import (
 
 def test_estimate_z_max_valid_input(mocker):
     dl_samples = np.array([30.0, 40.0, 50.0, 60.0, 70.0])
-    mock_z = mocker.patch("sky_analyzer.z_at_value", return_value=0.05)
+    mock_z = mocker.patch("gwsiren.sky_analyzer.z_at_value", return_value=0.05)
 
     z_max = estimate_event_specific_z_max(dl_samples, percentile_dL=95.0, z_margin_factor=1.2)
 
@@ -40,7 +40,7 @@ def test_estimate_z_max_empty_or_none_input(samples, caplog):
 def test_estimate_z_max_non_finite_dl_characteristic(mocker, caplog):
     caplog.set_level("WARNING")
     samples = np.array([np.nan, np.inf])
-    mock_z = mocker.patch("sky_analyzer.z_at_value", return_value=0.1)
+    mock_z = mocker.patch("gwsiren.sky_analyzer.z_at_value", return_value=0.1)
 
     result = estimate_event_specific_z_max(samples)
 
@@ -53,7 +53,7 @@ def test_estimate_z_max_non_finite_dl_characteristic(mocker, caplog):
 def test_estimate_z_max_z_at_value_exception(mocker, caplog):
     caplog.set_level("WARNING")
     samples = np.array([10.0, 20.0, 30.0])
-    mocker.patch("sky_analyzer.z_at_value", side_effect=RuntimeError("fail"))
+    mocker.patch("gwsiren.sky_analyzer.z_at_value", side_effect=RuntimeError("fail"))
 
     result = estimate_event_specific_z_max(samples)
 
@@ -67,7 +67,7 @@ def test_estimate_z_max_z_at_value_exception(mocker, caplog):
 )
 def test_estimate_z_max_clipping_behavior(mocker, mock_return, expected):
     samples = np.array([10.0, 20.0, 30.0])
-    mocker.patch("sky_analyzer.z_at_value", return_value=mock_return)
+    mocker.patch("gwsiren.sky_analyzer.z_at_value", return_value=mock_return)
 
     result = estimate_event_specific_z_max(samples)
 
@@ -114,7 +114,7 @@ def test_generate_skymap_all_zero_bincount(mocker, caplog):
     ra = np.array([0.0, 1.0])
     dec = np.array([0.0, 1.0])
     nside = 8
-    mocker.patch("sky_analyzer.np.bincount", return_value=np.zeros(hp.nside2npix(nside)))
+    mocker.patch("gwsiren.sky_analyzer.np.bincount", return_value=np.zeros(hp.nside2npix(nside)))
 
     prob_map, mask, threshold = generate_sky_map_and_credible_region(ra, dec, nside=nside)
 
@@ -216,7 +216,7 @@ def test_select_galaxies_index_error_handling(mocker, caplog):
     df = pd.DataFrame({"ra": [0.0], "dec": [0.0]})
     nside = 8
     mask = np.zeros(hp.nside2npix(nside), dtype=bool)
-    mocker.patch("sky_analyzer.hp.ang2pix", return_value=np.array([mask.size + 10]))
+    mocker.patch("gwsiren.sky_analyzer.hp.ang2pix", return_value=np.array([mask.size + 10]))
 
     result = select_galaxies_in_sky_region(df, mask, nside=nside)
 
