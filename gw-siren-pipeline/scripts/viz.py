@@ -665,7 +665,6 @@ def animate_mean_log_prob(
 # -------------------------------------------------------------------
 def main():
     """Main function for visualization: fetches samples, processes catalog, plots, and optionally runs H0 MCMC."""
-    
     parser = argparse.ArgumentParser(description="Visualize GW event data, skymaps, and run H0 MCMC.")
     parser.add_argument(
         "event_name", 
@@ -688,7 +687,6 @@ def main():
         handlers=[logging.StreamHandler(sys.stdout)]
     )
 
-
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     logger.info(f"Ensuring output directory exists: {os.path.abspath(OUTPUT_DIR)}")
 
@@ -710,6 +708,96 @@ def main():
         logger.error(f"Analysis failed: {results['error']}")
         return
 
+    # 1. Plot redshift distributions at each stage
+    plot_redshift_distribution(
+        results.get("glade_cleaned_df", pd.DataFrame()),
+        current_event_name,
+        "All Cleaned Galaxies"
+    )
+    plot_redshift_distribution(
+        results.get("spatially_selected_hosts_df", pd.DataFrame()),
+        current_event_name,
+        "Spatially Selected",
+        host_z_max_cutoff=results.get("host_z_max")
+    )
+    plot_redshift_distribution(
+        results.get("redshift_filtered_hosts_df", pd.DataFrame()),
+        current_event_name,
+        "Redshift Filtered",
+        host_z_max_cutoff=results.get("host_z_max")
+    )
+    plot_redshift_distribution(
+        results.get("candidate_hosts_df", pd.DataFrame()),
+        current_event_name,
+        "Final Candidate Hosts",
+        host_z_max_cutoff=results.get("host_z_max")
+    )
+
+    # 2. Plot the basic sky probability map
+    plot_basic_sky_probability_map(
+        results.get("prob_map"),
+        VIZ_NSIDE_SKYMAP,
+        current_event_name
+    )
+
+    # 3. Plot the sky map with galaxies and selected hosts
+    plot_skymap_with_galaxies(
+        results.get("prob_map"),
+        results.get("sky_mask"),
+        results.get("glade_cleaned_df", pd.DataFrame()),
+        results.get("candidate_hosts_df", pd.DataFrame()),
+        VIZ_NSIDE_SKYMAP,
+        current_event_name,
+        VIZ_PROB_THRESHOLD_CDF * 100,
+        results.get("host_z_max")
+    )
+
+    # 4. Plot the MCMC trace (if MCMC was run)
+    if results.get("sampler") is not None:
+        plot_mcmc_trace(
+            results["sampler"],
+            current_event_name,
+            VIZ_MCMC_BURNIN,
+            VIZ_MCMC_N_WALKERS,
+            mcmc_n_dim_expected=2
+        )
+
+    # 5. Plot and save the H0 posterior (corner plot)
+    if results.get("flat_h0_samples") is not None:
+        save_and_plot_h0_posterior_viz(
+            results["flat_h0_samples"],
+            current_event_name,
+            num_candidate_hosts=len(results.get("candidate_hosts_df", pd.DataFrame()))
+        )
+
+    # 6. Create walker animation GIFs (for a few walkers)
+    if results.get("sampler") is not None:
+        for walker_idx in range(min(3, VIZ_MCMC_N_WALKERS)):
+            create_walker_animation_gif(
+                results["sampler"],
+                VIZ_MCMC_N_STEPS,
+                VIZ_MCMC_BURNIN,
+                current_event_name,
+                walker_idx=walker_idx,
+                output_filename_template="{event_id}_walker_{walker_idx}_animation.gif",
+                plot_interval=10,
+                fps=15,
+                dim_to_plot=0
+            )
+
+        # 7. Create mean log-probability animation GIF
+        animate_mean_log_prob(
+            results["sampler"],
+            current_event_name,
+            VIZ_MCMC_N_STEPS,
+            burnin_steps=VIZ_MCMC_BURNIN,
+            output_dir=OUTPUT_DIR,
+            output_filename_template="log_prob_animation_{event_name}.gif",
+            plot_interval=10,
+            fps=20
+        )
+
+    # 8. 3D plot
     H0_for_3d_dist_calc = 70.0
     if results.get("flat_h0_samples") is not None:
         _, H0_for_3d_dist_calc, _ = np.percentile(results["flat_h0_samples"], [16, 50, 84])
