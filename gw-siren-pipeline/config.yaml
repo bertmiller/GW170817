@@ -14,6 +14,8 @@ mcmc:
   thin_by:         10
   prior_h0_min:    10.0
   prior_h0_max:    200.0
+  prior_alpha_min: -1.0
+  prior_alpha_max: 1.0
 
 cosmology:
   sigma_v_pec:     250.0

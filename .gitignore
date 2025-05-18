@@ -15,3 +15,5 @@ pesummary_cache/
 *.json
 *.jsonl
 *.gif
+summary.md
+PKG-INFO

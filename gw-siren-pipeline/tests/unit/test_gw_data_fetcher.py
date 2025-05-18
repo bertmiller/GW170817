@@ -47,7 +47,7 @@ def test_fetch_candidate_data_successful_fetch(prevent_main_import, mocker, mock
     fetch_mock.assert_called_once_with(
         "GW_TEST_SUCCESS",
         outdir=mock_config.catalog["data_dir"],
-        download_kwargs={"cache": True},
+        download_kwargs={"cache": True, "timeout": 30},
     )
     assert success is True and result is mock_result
 

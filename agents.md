@@ -174,3 +174,55 @@ The goal of this project is to create scalable pipelines for analyzing GW events
 - **Breaking Tests**: Do not submit changes that cause existing tests to fail, unless the test itself needs to be updated due to an intentional change in functionality.
 
 Thank you for helping improve this project!
+
+
+### GLADE+ DATABASE DESCRIPTION
+Column no.	Name	Description
+1	GLADE no	GLADE+ catalog number
+2	PGC no	Principal Galaxies Catalogue number
+3	GWGC name	Name in the GWGC catalog
+4	HyperLEDA name	Name in the HyperLEDA catalog
+5	2MASS name	Name in the 2MASS XSC catalog
+6	WISExSCOS name	Name in the WISExSuperCOSMOS catalog (wiseX)
+7	SDSS-DR16Q name	Name in the SDSS-DR16Q catalog
+8	Object type flag	Q: the source is from the SDSS-DR16Q catalog
+G:the source is from another catalog and has not been identified as a quasar
+9	RA	Right ascension in degrees
+10	Dec	Declination in degrees
+11	B	Apparent B magnitude
+12	B_err	Absolute error of apparent B magnitude
+13	B flag	0: the B magnitude is measured
+1: the B magnitude is calculated from the B_J magnitude
+14	B_Abs	Absolute B magnitude
+15	J	Apparent J magnitude
+16	J_err	Absolute error of apparent J magnitude
+17	H	Apparent H magnitude
+18	H_err	Absolute error of apparent H magnitude
+19	K	Apparent K_s magnitude
+20	K_err	Absolute error of apparent K_s magnitude
+21	W1	Apparent W1 magnitude
+22	W1_err	Absolute error of apparent W1 magnitude
+23	W2	Apparent W2 magnitude
+24	W2_err	Absolute error of apparent W2 magnitude
+25	W1 flag	0: the W1 magnitude is measured
+1: the W1 magnitude is calculated from the K_s magnitude
+26	B_J	Apparent B_J magnitude
+27	B_J err	Absolute error of apparent B_J magnitude
+28	z_helio	Redshift in the heliocentric frame
+29	z_cmb	Redshift converted to the Cosmic Microwave Background (CMB) frame
+30	z flag	0: the CMB frame redshift and luminosity distance values given in columns 29 and 33 are not corrected for the peculiar velocity
+1: they are corrected values
+31	v_err	Error of redshift from the peculiar velocity estimation
+32	z_err	Measurement error of heliocentric redshift
+33	d_L	Luminosity distance in Mpc units
+34	d_L err	Error of luminosity distance in Mpc units
+35	dist flag	0: the galaxy has no measured redshift or distance value
+1: it has a measured photometric redshift from which we have calculated its luminosity distance
+2: it has a measured luminosity distance value from which we have calculated its redshift
+3: it has a measured spectroscopic redshift from which we have calculated its luminosity distance
+36	M*	Stellar mass in 10^10 M_Sun units
+37	M*_err	Absolute error of stellar mass in 10^10 M_Sun units
+38	M* flag	0: if the stellar mass was calculated assuming no active star formation
+1: if the stellar mass was calculated assuming active star formation
+39	Merger rate	Base-10 logarithm of estimated BNS merger rate in the galaxy in Gyr^-1 units
+40	Merger rate error	Absolute error of estimated BNS merger rate in the galaxy
