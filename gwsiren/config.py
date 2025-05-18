@@ -49,7 +49,17 @@ class Config:
 
 
 def load_config(path: str | pathlib.Path | None = None) -> Config:
-    cfg_path = pathlib.Path(path or __file__).with_name('config.yaml')
+    """Load configuration from YAML file.
+    
+    Args:
+        path: Path to config file. If None, looks for config.yaml in root directory.
+    """
+    if path is None:
+        # Look for config.yaml in root directory (parent of gwsiren package)
+        cfg_path = pathlib.Path(__file__).parent.parent / 'config.yaml'
+    else:
+        cfg_path = pathlib.Path(path)
+        
     if not cfg_path.exists():
         raise RuntimeError(f'Config file not found: {cfg_path}')
     text = cfg_path.read_text()

@@ -9,8 +9,8 @@ skymap:
 
 mcmc:
   walkers:         32
-  steps:           6000
-  burnin:          1000
+  steps:           2000
+  burnin:          100
   thin_by:         10
   prior_h0_min:    10.0
   prior_h0_max:    200.0
