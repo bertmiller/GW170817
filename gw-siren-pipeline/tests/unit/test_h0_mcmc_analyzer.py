@@ -143,6 +143,26 @@ def test_H0LogLikelihood_lum_dist_model_z_zero(mock_config):
     assert np.isclose(result, 0.0)
 
 
+def test_lum_dist_model_uses_single_cosmology_instance(mock_config, mocker):
+    call_counter = {'count': 0}
+
+    class DummyCosmo:
+        def __init__(self, *args, **kwargs):
+            call_counter['count'] += 1
+
+        def luminosity_distance(self, z):
+            return np.asarray(z) * u.Mpc
+
+    mocker.patch('gwsiren.h0_mcmc_analyzer.FlatLambdaCDM', DummyCosmo)
+
+    ll = H0LogLikelihood(np.array([10.0]), np.array([0.01]), np.array([1.0]))
+
+    ll._lum_dist_model(0.1, 70.0)
+    ll._lum_dist_model(0.2, 70.0)
+
+    assert call_counter['count'] == 1
+
+
 def test_call_vectorized_vs_looped_equivalence(mock_config):
     dL_gw_samples = np.array([50.0, 60.0, 70.0, 80.0])
     host_z = np.array([0.01, 0.015])
