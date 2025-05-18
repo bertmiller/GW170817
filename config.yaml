@@ -1,0 +1,21 @@
+catalog:
+  glade_plus_url:  http://elysium.elte.hu/~dalyag/GLADE+.txt
+  glade24_url:     https://glade.elte.hu/GLADE-2.4.txt
+  data_dir:        data/
+
+skymap:
+  default_nside:   128
+  credible_level:  0.90
+
+mcmc:
+  walkers:         32
+  steps:           2000
+  burnin:          100
+  thin_by:         10
+  prior_h0_min:    10.0
+  prior_h0_max:    200.0
+
+cosmology:
+  sigma_v_pec:     250.0
+  c_light:         299792.458
+  omega_m:         0.31

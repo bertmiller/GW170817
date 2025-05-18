@@ -12,6 +12,7 @@ Outputs:
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
+from gwsiren import CONFIG
 
 # Import from our new module
 from gw_data_fetcher import fetch_candidate_data, configure_astropy_cache, DEFAULT_CACHE_DIR_NAME
@@ -31,7 +32,7 @@ from sky_analyzer import (
     generate_sky_map_and_credible_region,
     select_galaxies_in_sky_region,
     filter_galaxies_by_redshift,
-    DEFAULT_NSIDE_SKYMAP, 
+    DEFAULT_NSIDE_SKYMAP,
     DEFAULT_PROB_THRESHOLD_CDF
 )
 
@@ -54,7 +55,7 @@ DEFAULT_EVENT_NAME = "GW170817"
 # DEFAULT_SAMPLES_PATH_PREFIX removed as gw_data_fetcher handles table selection
 
 # GLADE Catalog specific
-GLADE_URL = "https://glade.elte.hu/GLADE-2.4.txt"
+GLADE_URL = CONFIG.catalog["glade24_url"]
 GLADE_FILE = "GLADE_2.4.txt"
 GLADE_USE_COLS = [0, 6, 7, 15]  # PGC, RA, Dec, z
 GLADE_COL_NAMES = ['PGC', 'ra', 'dec', 'z']
@@ -66,21 +67,21 @@ GLADE_RANGE_CHECKS = {
 }
 
 # Analysis specific
-NSIDE_SKYMAP = 128
-PROB_THRESHOLD_CDF = 0.95
+NSIDE_SKYMAP = CONFIG.skymap["default_nside"]
+PROB_THRESHOLD_CDF = CONFIG.skymap["credible_level"]
 HOST_Z_MAX = 0.15 # Final redshift cut for candidate hosts
 
 # Cosmological parameters for likelihood
-SIGMA_V_PEC = 250.0  # km/s, peculiar velocity uncertainty
-C_LIGHT = 299792.458 # km/s
-OMEGA_M = 0.31
+SIGMA_V_PEC = CONFIG.cosmology["sigma_v_pec"]  # km/s, peculiar velocity uncertainty
+C_LIGHT = CONFIG.cosmology["c_light"]
+OMEGA_M = CONFIG.cosmology["omega_m"]
 
 # MCMC parameters
 MCMC_N_DIM = 1
-MCMC_N_WALKERS = 32
-MCMC_N_STEPS = 6000
-MCMC_BURNIN = 1000
-MCMC_THIN_BY = 10
+MCMC_N_WALKERS = CONFIG.mcmc["walkers"]
+MCMC_N_STEPS = CONFIG.mcmc["steps"]
+MCMC_BURNIN = CONFIG.mcmc["burnin"]
+MCMC_THIN_BY = CONFIG.mcmc["thin_by"]
 MCMC_INITIAL_H0_MEAN = 70
 MCMC_INITIAL_H0_STD = 10
 

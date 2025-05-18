@@ -5,12 +5,13 @@ from astropy.coordinates import SkyCoord
 from astropy import units as u
 from astropy.cosmology import FlatLambdaCDM, z_at_value
 import logging
+from gwsiren import CONFIG
 
 logger = logging.getLogger(__name__)
 
 # Default Sky Analysis Parameters (can be overridden by passing as arguments to functions)
-DEFAULT_NSIDE_SKYMAP = 128
-DEFAULT_PROB_THRESHOLD_CDF = 0.90 # For 90% credible region
+DEFAULT_NSIDE_SKYMAP = CONFIG.skymap["default_nside"]
+DEFAULT_PROB_THRESHOLD_CDF = CONFIG.skymap["credible_level"]  # For 90% credible region
 # HOST_Z_MAX is intentionally not a global default here, as it's a crucial analysis choice
 # and should be explicitly passed to functions that use it.
 

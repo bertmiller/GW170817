@@ -18,6 +18,7 @@ from astropy.cosmology import FlatLambdaCDM
 from astropy import units as u
 from astropy.coordinates import SkyCoord
 import emcee
+from gwsiren import CONFIG
 
 # -------------------------------------------------------------------
 # 0.  Fetch posterior samples with pesummary
@@ -37,7 +38,7 @@ dec_samples= np.rad2deg(samples["dec"])
 # -------------------------------------------------------------------
 # 1.  Download (if needed) and load GLADE v2.4
 # -------------------------------------------------------------------
-GLADE_URL = "https://glade.elte.hu/GLADE-2.4.txt"
+GLADE_URL = CONFIG.catalog["glade24_url"]
 GLADE_FILE = "GLADE_2.4.txt"
 
 if not os.path.exists(GLADE_FILE):
