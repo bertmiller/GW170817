@@ -3,11 +3,7 @@ import sys
 from unittest.mock import MagicMock
 import pytest
 
-from gwsiren.gw_data_fetcher import (
-    configure_astropy_cache,
-    fetch_candidate_data,
-    DEFAULT_CACHE_DIR_NAME,
-)
+from gwsiren.gw_data_fetcher import configure_astropy_cache, fetch_candidate_data
 
 
 @pytest.fixture
@@ -47,7 +43,7 @@ def test_fetch_candidate_data_successful_fetch(prevent_main_import, mocker, mock
     fetch_mock.assert_called_once_with(
         "GW_TEST_SUCCESS",
         outdir=mock_config.catalog["data_dir"],
-        download_kwargs={"cache": True, "timeout": 30},
+        download_kwargs={"cache": True, "timeout": mock_config.fetcher["timeout"]},
     )
     assert success is True and result is mock_result
 

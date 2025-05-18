@@ -21,11 +21,7 @@ import pandas as pd
 from emcee.interruptible_pool import InterruptiblePool
 from gwsiren import CONFIG
 
-from gwsiren.gw_data_fetcher import (
-    configure_astropy_cache,
-    fetch_candidate_data,
-    DEFAULT_CACHE_DIR_NAME,
-)
+from gwsiren.gw_data_fetcher import configure_astropy_cache, fetch_candidate_data
 from gwsiren.event_data_extractor import extract_gw_event_parameters
 from gwsiren.data.catalogs import (
     download_and_load_galaxy_catalog,
@@ -132,7 +128,7 @@ def main() -> None:
     )
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    cache_dir = configure_astropy_cache(DEFAULT_CACHE_DIR_NAME)
+    cache_dir = configure_astropy_cache(CONFIG.fetcher["cache_dir_name"])
     if not cache_dir:
         logger.critical("Failed to configure astropy cache.")
         sys.exit(1)

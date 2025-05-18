@@ -43,10 +43,13 @@ def _minimal_yaml_load(text: str) -> dict:
 
 @dataclass(frozen=True)
 class Config:
+    """Typed container for configuration sections."""
+
     catalog: dict
     skymap: dict
     mcmc: dict
     cosmology: dict
+    fetcher: dict
 
 
 def load_config(path: str | pathlib.Path | None = None) -> Config:

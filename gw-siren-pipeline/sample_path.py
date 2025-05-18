@@ -1,5 +1,6 @@
 import sys
-from gw_data_fetcher import fetch_candidate_data, configure_astropy_cache, DEFAULT_CACHE_DIR_NAME
+from gw_data_fetcher import fetch_candidate_data, configure_astropy_cache
+from gwsiren import CONFIG
 
 # Candidate list can be defined here or passed around
 candidate_list = [
@@ -13,9 +14,8 @@ failed_candidates_reasons = {}
 
 def main():
     # Configure cache once at the beginning of your script/application
-    # The `DEFAULT_CACHE_DIR_NAME` is imported from your new module.
     # You can also specify a custom path here, e.g., configure_astropy_cache("./my_custom_cache")
-    current_cache_dir = configure_astropy_cache(DEFAULT_CACHE_DIR_NAME) 
+    current_cache_dir = configure_astropy_cache(CONFIG.fetcher["cache_dir_name"])
     
     if not current_cache_dir:
         print("CRITICAL: Failed to configure cache directory. Exiting.", file=sys.stderr)

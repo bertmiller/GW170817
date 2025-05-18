@@ -38,7 +38,7 @@ logging.basicConfig(
 )
 
 # Import from our new module
-from gw_data_fetcher import fetch_candidate_data, configure_astropy_cache, DEFAULT_CACHE_DIR_NAME
+from gw_data_fetcher import fetch_candidate_data, configure_astropy_cache
 from event_data_extractor import extract_gw_event_parameters
 
 # Galaxy Catalog Handling
@@ -691,7 +691,7 @@ def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     logger.info(f"Ensuring output directory exists: {os.path.abspath(OUTPUT_DIR)}")
 
-    effective_cache_dir = configure_astropy_cache(DEFAULT_CACHE_DIR_NAME)
+    effective_cache_dir = configure_astropy_cache(CONFIG.fetcher["cache_dir_name"])
     if not effective_cache_dir: logger.critical("❌ CRITICAL: Failed to configure cache. Exiting."); sys.exit(1)
 
     current_event_name = args.event_name # Use event_name from argparse

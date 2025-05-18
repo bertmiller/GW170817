@@ -44,12 +44,19 @@ def test_load_glade_plus_from_local_mock_file(mock_config, caplog, monkeypatch):
     from gwsiren.data import catalogs
     monkeypatch.setattr(catalogs, "DATA_DIR", str(temp_catalog_dir))
     
-    # Use the actual test_GLADE+.txt file as the data source
-    log_step("Copying test_GLADE+.txt to temp directory")
-    test_data_path = Path(__file__).parent / "test_GLADE+.txt"
+    # Create a small mock GLADE+ file with 10 rows and the necessary columns
+    log_step("Creating mock GLADE+ file")
     target_file = temp_catalog_dir / "GLADE+.txt"
-    shutil.copy(test_data_path, target_file)
-    log_step(f"Copied {test_data_path} to {target_file}")
+    with open(target_file, "w") as f:
+        for i in range(10):
+            row = ["0"] * 36
+            row[1] = str(43495 + i)
+            row[8] = str(192.721451 + i)
+            row[9] = str(41.120152 + i)
+            row[27] = str(0.000990570495285 + i * 0.001)
+            row[35] = str(float(i + 1))
+            f.write(" ".join(row) + "\n")
+    log_step(f"Mock catalog written to {target_file}")
     
     try:
         # Call the function to load the catalog

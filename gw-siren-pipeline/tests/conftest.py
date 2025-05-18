@@ -55,6 +55,11 @@ def mock_config(monkeypatch, tmp_path, project_root_dir):
             "c_light": 299792.458,
             "omega_m": 0.3,
         },
+        "fetcher": {
+            "cache_dir_name": "test_cache",
+            "timeout": 42,
+            "max_retries": 2,
+        },
     }
     config_file_path = tmp_path / "test_mock_config.yaml"
     with open(config_file_path, 'w') as f:
@@ -70,6 +75,7 @@ def mock_config(monkeypatch, tmp_path, project_root_dir):
     # Also patch CONFIG where it might be imported directly by modules at their top level.
     # Add other modules here if they also do `from gwsiren import CONFIG`
     modules_to_patch_config = [
+        "gwsiren.gw_data_fetcher",
         "gwsiren.data.catalogs",
         "sky_analyzer",
         "h0_mcmc_analyzer",
