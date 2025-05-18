@@ -37,9 +37,10 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)] # Ensure logs go to stdout
 )
 
-# Import from our new module
-from gw_data_fetcher import fetch_candidate_data, configure_astropy_cache, DEFAULT_CACHE_DIR_NAME
-from event_data_extractor import extract_gw_event_parameters
+# Import from gwsiren package
+from gwsiren.gw_data_fetcher import fetch_candidate_data, configure_astropy_cache, DEFAULT_CACHE_DIR_NAME
+from gwsiren.event_data_extractor import extract_gw_event_parameters
+from h0_e2e_pipeline import run_full_analysis  # Using absolute import since we're in the same directory
 
 # Galaxy Catalog Handling
 from gwsiren.data.catalogs import (
@@ -51,7 +52,7 @@ from gwsiren.data.catalogs import (
 )
 
 # Sky Analysis and Candidate Selection
-from sky_analyzer import (
+from gwsiren.sky_analyzer import (
     generate_sky_map_and_credible_region,
     select_galaxies_in_sky_region,
     filter_galaxies_by_redshift,
@@ -59,7 +60,7 @@ from sky_analyzer import (
 )
 
 # H0 MCMC Analysis
-from h0_mcmc_analyzer import (
+from gwsiren.h0_mcmc_analyzer import (
     get_log_likelihood_h0,
     run_mcmc_h0,
     process_mcmc_samples,
@@ -70,7 +71,7 @@ from h0_mcmc_analyzer import (
 )
 
 # Import the new 3D plotting function
-from plot_utils import plot_3d_localization_with_galaxies
+from gwsiren.plot_utils import plot_3d_localization_with_galaxies
 
 # -------------------------------------------------------------------
 # Configuration specific to this visualization script
@@ -664,7 +665,6 @@ def animate_mean_log_prob(
 # -------------------------------------------------------------------
 def main():
     """Main function for visualization: fetches samples, processes catalog, plots, and optionally runs H0 MCMC."""
-    
     parser = argparse.ArgumentParser(description="Visualize GW event data, skymaps, and run H0 MCMC.")
     parser.add_argument(
         "event_name", 
@@ -687,226 +687,132 @@ def main():
         handlers=[logging.StreamHandler(sys.stdout)]
     )
 
-    # Create output directory if it doesn't exist
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     logger.info(f"Ensuring output directory exists: {os.path.abspath(OUTPUT_DIR)}")
 
-    effective_cache_dir = configure_astropy_cache(DEFAULT_CACHE_DIR_NAME)
-    if not effective_cache_dir: logger.critical("❌ CRITICAL: Failed to configure cache. Exiting."); sys.exit(1)
+    current_event_name = args.event_name
+    logger.info(
+        f"--- Starting Full Visualization Analysis for Event: {current_event_name} ---"
+    )
 
-    current_event_name = args.event_name # Use event_name from argparse
-    logger.info(f"--- Starting Full Visualization Analysis for Event: {current_event_name} (Log Level: {logging.getLevelName(logger.getEffectiveLevel())}) ---")
-    
-    # Initialize H0 to be used for the 3D plot; default or from MCMC
-    H0_for_3d_dist_calc = 70.0  # Default H0 km/s/Mpc
-    logger.info(f"ℹ️ Default H0 for 3D plot distance calculations initialized to: {H0_for_3d_dist_calc} km/s/Mpc")
+    results = run_full_analysis(
+        current_event_name,
+        perform_mcmc=True,
+        nside_skymap=VIZ_NSIDE_SKYMAP,
+        cdf_threshold=VIZ_PROB_THRESHOLD_CDF,
+        catalog_type=VIZ_CATALOG_TYPE,
+        host_z_max_fallback=VIZ_HOST_Z_MAX_FALLBACK,
+    )
 
-    # 1. Fetch GW data and extract parameters
-    logger.info(f"Fetching GW data for {current_event_name}...")
-    success, gw_data_obj = fetch_candidate_data(current_event_name, effective_cache_dir)
-    if not success: logger.error(f"❌ Failed to fetch GW data: {gw_data_obj}. Some visualizations might be skipped."); gw_data_obj = None
-    
-    dL_gw_samples, ra_gw_samples, dec_gw_samples = (None, None, None)
-    if gw_data_obj:
-        dL_gw_samples, ra_gw_samples, dec_gw_samples = extract_gw_event_parameters(gw_data_obj, current_event_name)
+    if results.get("error"):
+        logger.error(f"Analysis failed: {results['error']}")
+        return
 
-    if ra_gw_samples is None or dec_gw_samples is None:
-        logger.error(f"❌ Failed to get essential RA/Dec samples for {current_event_name}. Sky maps will be skipped. MCMC may also be affected.")
-    else:
-        logger.info(f"Successfully extracted {len(ra_gw_samples)} RA/Dec GW samples.")
-        if dL_gw_samples is not None: logger.info(f"  and {len(dL_gw_samples)} dL samples.")
+    # 1. Plot redshift distributions at each stage
+    plot_redshift_distribution(
+        results.get("glade_cleaned_df", pd.DataFrame()),
+        current_event_name,
+        "All Cleaned Galaxies"
+    )
+    plot_redshift_distribution(
+        results.get("spatially_selected_hosts_df", pd.DataFrame()),
+        current_event_name,
+        "Spatially Selected",
+        host_z_max_cutoff=results.get("host_z_max")
+    )
+    plot_redshift_distribution(
+        results.get("redshift_filtered_hosts_df", pd.DataFrame()),
+        current_event_name,
+        "Redshift Filtered",
+        host_z_max_cutoff=results.get("host_z_max")
+    )
+    plot_redshift_distribution(
+        results.get("candidate_hosts_df", pd.DataFrame()),
+        current_event_name,
+        "Final Candidate Hosts",
+        host_z_max_cutoff=results.get("host_z_max")
+    )
 
-    # Estimate event-specific host_z_max
-    if dL_gw_samples is not None and len(dL_gw_samples) > 0:
-        logger.info("Estimating event-specific host_z_max based on dL_gw_samples...")
-        current_host_z_max_dynamic = estimate_event_specific_z_max(
-            dL_gw_samples,
-            percentile_dL=95.0,     
-            z_margin_factor=1.2,    
-            min_z_max_val=0.01,     
-            max_z_max_val=0.3       # Max z for this adaptive cut; GLADE cleaning has a broader one
+    # 2. Plot the basic sky probability map
+    plot_basic_sky_probability_map(
+        results.get("prob_map"),
+        VIZ_NSIDE_SKYMAP,
+        current_event_name
+    )
+
+    # 3. Plot the sky map with galaxies and selected hosts
+    plot_skymap_with_galaxies(
+        results.get("prob_map"),
+        results.get("sky_mask"),
+        results.get("glade_cleaned_df", pd.DataFrame()),
+        results.get("candidate_hosts_df", pd.DataFrame()),
+        VIZ_NSIDE_SKYMAP,
+        current_event_name,
+        VIZ_PROB_THRESHOLD_CDF * 100,
+        results.get("host_z_max")
+    )
+
+    # 4. Plot the MCMC trace (if MCMC was run)
+    if results.get("sampler") is not None:
+        plot_mcmc_trace(
+            results["sampler"],
+            current_event_name,
+            VIZ_MCMC_BURNIN,
+            VIZ_MCMC_N_WALKERS,
+            mcmc_n_dim_expected=2
         )
-        logger.info(f"Using dynamically estimated host_z_max: {current_host_z_max_dynamic:.4f} for event {current_event_name}")
-    else:
-        # Fallback if dL_gw_samples are not available for some reason
-        current_host_z_max_dynamic = VIZ_HOST_Z_MAX_FALLBACK # Use the script's static default fallback
-        logger.warning(f"dL_gw_samples not available. Using static VIZ_HOST_Z_MAX_FALLBACK: {current_host_z_max_dynamic:.4f}")
 
-    # 2. Generate basic sky probability map (if RA/Dec available)
-    prob_map_gw_for_plots, sky_mask_for_plots = (None, None)
-    if ra_gw_samples is not None and dec_gw_samples is not None:
-        prob_map_gw_for_plots, sky_mask_for_plots, _ = generate_sky_map_and_credible_region(
-            ra_gw_samples, dec_gw_samples, 
-            nside=VIZ_NSIDE_SKYMAP, 
-            cdf_threshold=VIZ_PROB_THRESHOLD_CDF
+    # 5. Plot and save the H0 posterior (corner plot)
+    if results.get("flat_h0_samples") is not None:
+        save_and_plot_h0_posterior_viz(
+            results["flat_h0_samples"],
+            current_event_name,
+            num_candidate_hosts=len(results.get("candidate_hosts_df", pd.DataFrame()))
         )
-        if prob_map_gw_for_plots is not None and prob_map_gw_for_plots.sum() > 0:
-            # plot_basic_sky_probability_map(
-            #     prob_map_gw_for_plots,
-            #     VIZ_NSIDE_SKYMAP,
-            #     current_event_name
-            # )
-            pass
-        else:
-            logger.warning("Skipping basic sky probability map due to issues generating it.")
-    else:
-        logger.warning("Skipping basic sky probability map due to missing RA/Dec samples.")
 
-    logger.info("--- Preparing data for skymap with galaxies and H0 MCMC ---")
-    # 3. Load and clean galaxy catalog
-    glade_raw_df = download_and_load_galaxy_catalog(catalog_type=VIZ_CATALOG_TYPE)
-    if glade_raw_df.empty: logger.error(f"❌ {VIZ_CATALOG_TYPE.upper()} catalog empty after loading. Galaxy-dependent plots and MCMC will be skipped."); return
-    
-    glade_cleaned_df = clean_galaxy_catalog(glade_raw_df, range_filters=DEFAULT_RANGE_CHECKS)
-    if glade_cleaned_df.empty: logger.error(f"❌ {VIZ_CATALOG_TYPE.upper()} catalog empty after cleaning. Galaxy-dependent plots and MCMC will be skipped."); return
-
-    # 4. Select candidate hosts for visualization and potential MCMC
-    final_candidate_hosts_df = pd.DataFrame() 
-    if sky_mask_for_plots is not None and sky_mask_for_plots.any():
-        spatially_selected_galaxies_df = select_galaxies_in_sky_region(
-            glade_cleaned_df, sky_mask_for_plots, nside=VIZ_NSIDE_SKYMAP
-        )
-        if not spatially_selected_galaxies_df.empty:
-            # plot_redshift_distribution(
-            #     spatially_selected_galaxies_df, current_event_name, 
-            #     "Spatially Selected (in C.R.)", host_z_max_cutoff=current_host_z_max_dynamic
-            # )
-            intermediate_hosts_df = filter_galaxies_by_redshift(spatially_selected_galaxies_df, current_host_z_max_dynamic)
-            final_candidate_hosts_df = apply_specific_galaxy_corrections(
-                intermediate_hosts_df, current_event_name, VIZ_GALAXY_CORRECTIONS
+    # 6. Create walker animation GIFs (for a few walkers)
+    if results.get("sampler") is not None:
+        for walker_idx in range(min(3, VIZ_MCMC_N_WALKERS)):
+            create_walker_animation_gif(
+                results["sampler"],
+                VIZ_MCMC_N_STEPS,
+                VIZ_MCMC_BURNIN,
+                current_event_name,
+                walker_idx=walker_idx,
+                output_filename_template="{event_id}_walker_{walker_idx}_animation.gif",
+                plot_interval=10,
+                fps=15,
+                dim_to_plot=0
             )
-    else:
-        logger.warning("Sky mask for CR not available or empty. Attempting selection from full catalog with z-cut for MCMC if needed.")
-        # Fallback: if no sky_mask, consider all cleaned galaxies up to current_host_z_max_dynamic for MCMC
-        intermediate_hosts_df = filter_galaxies_by_redshift(glade_cleaned_df, current_host_z_max_dynamic)
-        final_candidate_hosts_df = apply_specific_galaxy_corrections(
-            intermediate_hosts_df, current_event_name, VIZ_GALAXY_CORRECTIONS
+
+        # 7. Create mean log-probability animation GIF
+        animate_mean_log_prob(
+            results["sampler"],
+            current_event_name,
+            VIZ_MCMC_N_STEPS,
+            burnin_steps=VIZ_MCMC_BURNIN,
+            output_dir=OUTPUT_DIR,
+            output_filename_template="log_prob_animation_{event_name}.gif",
+            plot_interval=10,
+            fps=20
         )
 
-    if final_candidate_hosts_df.empty:
-        logger.warning(f"⚠️ No candidate host galaxies identified for {current_event_name} after selection process. Overlay plot might be sparse. MCMC for H0 might be skipped or use broader galaxy set.")
-    else:
-        logger.info(f"Final number of candidate hosts for {current_event_name} for overlay & H0: {len(final_candidate_hosts_df)}")
-        # plot_redshift_distribution(
-        #     final_candidate_hosts_df, current_event_name, 
-        #     "Final Candidate Hosts (for MCMC/Overlay)", host_z_max_cutoff=current_host_z_max_dynamic
-        # )
-        pass
+    # 8. 3D plot
+    H0_for_3d_dist_calc = 70.0
+    if results.get("flat_h0_samples") is not None:
+        _, H0_for_3d_dist_calc, _ = np.percentile(results["flat_h0_samples"], [16, 50, 84])
 
-    # Plot skymap with galaxies (if prob_map_gw and sky_mask_for_plots were generated)
-    if prob_map_gw_for_plots is not None and sky_mask_for_plots is not None:
-        # plot_skymap_with_galaxies(
-        #     prob_map_gw=prob_map_gw_for_plots,
-        #     sky_mask_boolean=sky_mask_for_plots,
-        #     all_galaxies_df=glade_cleaned_df,
-        #     selected_hosts_df=final_candidate_hosts_df, # Use the most refined set for highlighting
-        #     nside=VIZ_NSIDE_SKYMAP,
-        #     event_name=current_event_name,
-        #     cred_level_percent=VIZ_PROB_THRESHOLD_CDF * 100,
-        #     host_z_max=current_host_z_max_dynamic
-        # )
-        pass
-    else:
-        logger.warning("Skipping skymap with galaxies due to missing probability map or sky mask.")
-
-    # 5. Perform MCMC for H0 if dL samples and some candidate hosts are available
-    can_run_mcmc = dL_gw_samples is not None and len(dL_gw_samples) > 0
-    if can_run_mcmc and not final_candidate_hosts_df.empty:
-        logger.info(f"\n--- Proceeding with MCMC H0 estimation for {current_event_name} (within viz.py) ---")
-        try:
-            logger.debug(f"DEBUG VIZ: dL_gw_samples (first 5): {dL_gw_samples[:5]}, len: {len(dL_gw_samples)}, any non-finite: {np.any(~np.isfinite(dL_gw_samples))}")
-            zs_for_mcmc = final_candidate_hosts_df['z'].values
-            logger.debug(f"DEBUG VIZ: host_galaxies_z (first 5): {zs_for_mcmc[:5]}, len: {len(zs_for_mcmc)}, any non-finite: {np.any(~np.isfinite(zs_for_mcmc))}")
-            
-            log_likelihood_h0_func = get_log_likelihood_h0(
-                dL_gw_samples, zs_for_mcmc, # Use the printed variable
-                DEFAULT_SIGMA_V_PEC, DEFAULT_C_LIGHT, DEFAULT_OMEGA_M,
-                DEFAULT_H0_PRIOR_MIN, DEFAULT_H0_PRIOR_MAX
-            )
-        except ValueError as ve:
-            logger.error(f"❌ Error creating H0 likelihood for viz: {ve}. Skipping MCMC."); log_likelihood_h0_func = None
-
-        if log_likelihood_h0_func:
-            # Determine number of cores for parallelization
-            n_cores = os.cpu_count()
-            logger.info(f"Utilizing {n_cores} cores for MCMC parallelization.")
-
-            with InterruptiblePool(n_cores) as pool:
-                mcmc_sampler = run_mcmc_h0(
-                    log_likelihood_h0_func, current_event_name,
-                    n_walkers=VIZ_MCMC_N_WALKERS, n_steps=VIZ_MCMC_N_STEPS,
-                    pool=pool # Pass the pool object
-                )
-                if mcmc_sampler:
-                    plot_mcmc_trace(mcmc_sampler, current_event_name, VIZ_MCMC_BURNIN, VIZ_MCMC_N_WALKERS, DEFAULT_MCMC_N_DIM)
-                    flat_h0_samples = process_mcmc_samples(mcmc_sampler, current_event_name, VIZ_MCMC_BURNIN, VIZ_MCMC_THIN_BY, DEFAULT_MCMC_N_DIM)
-                    if flat_h0_samples is not None and len(flat_h0_samples) > 0:
-                        save_and_plot_h0_posterior_viz(flat_h0_samples, current_event_name, len(final_candidate_hosts_df))
-                        # Update H0_for_3d_dist_calc with MCMC median result
-                        _, q50_mcmc, _ = np.percentile(flat_h0_samples, [16, 50, 84])
-                        H0_for_3d_dist_calc = q50_mcmc
-                        logger.info(f"ℹ️ H0 for 3D plot distance calculations updated to MCMC median: {H0_for_3d_dist_calc:.1f} km/s/Mpc")
-                    else:
-                        logger.warning(f"Skipping H0 posterior plot for {current_event_name} due to no valid MCMC samples after processing.")
-                        logger.warning(f"⚠️ MCMC samples not available after processing; 3D plot will use H0: {H0_for_3d_dist_calc:.1f} km/s/Mpc.")
-
-                    # Create and save walker animation GIF
-                    create_walker_animation_gif(
-                        sampler=mcmc_sampler,
-                        n_steps=VIZ_MCMC_N_STEPS,       # Total steps configured for MCMC
-                        burnin_steps=VIZ_MCMC_BURNIN,   # Burn-in steps configured
-                        event_id=current_event_name,
-                        walker_idx=0,                   # Animate the first walker by default
-                        plot_interval=max(1, VIZ_MCMC_N_STEPS // 100), # Aim for ~100 frames, ensure at least 1
-                        fps=15
-                    )
-
-                    # Create and save mean log probability animation GIF
-                    animate_mean_log_prob(
-                        sampler=mcmc_sampler,
-                        event_name=current_event_name,
-                        n_total_steps=VIZ_MCMC_N_STEPS,
-                        burnin_steps=VIZ_MCMC_BURNIN,
-                        output_dir=OUTPUT_DIR,
-                        plot_interval=max(1, VIZ_MCMC_N_STEPS // 100),
-                        fps=15,
-                    )
-                else:
-                    logger.error(f"Skipping MCMC post-processing for {current_event_name} because MCMC run failed or returned no sampler.")
-                    logger.warning(f"⚠️ MCMC run failed; 3D plot will use H0: {H0_for_3d_dist_calc:.1f} km/s/Mpc.")
-    elif not can_run_mcmc:
-        logger.info(f"\n--- Skipping MCMC H0 estimation for {current_event_name} due to missing dL samples. 3D plot will use H0: {H0_for_3d_dist_calc:.1f} km/s/Mpc. ---")
-    elif final_candidate_hosts_df.empty: # This implies dL_gw_samples were present, but no hosts found
-        logger.info(f"\n--- Skipping MCMC H0 estimation for {current_event_name} because no candidate host galaxies were identified. 3D plot will use H0: {H0_for_3d_dist_calc:.1f} km/s/Mpc. ---")
-
-    # 6. Generate 3D Localization Plot
-    logger.info(f"--- Preparing for 3D Localization Plot for {current_event_name} ---")
-    if ra_gw_samples is not None and dec_gw_samples is not None and dL_gw_samples is not None:
-        
-        # Ensure final_candidate_hosts_df is a DataFrame, even if empty.
-        # The plot_3d_localization_with_galaxies function handles an empty DataFrame gracefully.
-        effective_hosts_df_for_3d = final_candidate_hosts_df
-        if not isinstance(final_candidate_hosts_df, pd.DataFrame):
-            logger.warning(f"⚠️ final_candidate_hosts_df was not a DataFrame (type: {type(final_candidate_hosts_df)}). Using empty DataFrame for 3D plot.")
-            effective_hosts_df_for_3d = pd.DataFrame()
-            if final_candidate_hosts_df is not None and len(final_candidate_hosts_df) > 0 : # if it was non-empty but not a df
-                 logger.warning("  Original final_candidate_hosts_df was not empty, this might indicate an issue.")
-
-
-        plot_3d_localization_with_galaxies(
-            event_name=current_event_name,
-            ra_gw_samples=ra_gw_samples,
-            dec_gw_samples=dec_gw_samples,
-            dL_gw_samples=dL_gw_samples,
-            candidate_hosts_df=effective_hosts_df_for_3d,
-            H0_for_galaxy_dist=H0_for_3d_dist_calc,
-            omega_m_for_galaxy_dist=DEFAULT_OMEGA_M, # Imported from h0_mcmc_analyzer
-            num_gw_samples_to_plot=1000, # Default, can be made a VIZ_ constant
-            output_dir=OUTPUT_DIR # Pass the output directory to the 3D plot function
-        )
-    else:
-        logger.warning(f"⚠️ Skipping 3D localization plot for {current_event_name} due to missing essential GW sample data (RA, Dec, or dL).")
-
+    plot_3d_localization_with_galaxies(
+        event_name=current_event_name,
+        ra_gw_samples=results.get("ra_samples"),
+        dec_gw_samples=results.get("dec_samples"),
+        dL_gw_samples=results.get("dL_samples"),
+        candidate_hosts_df=results.get("candidate_hosts_df", pd.DataFrame()),
+        H0_for_galaxy_dist=H0_for_3d_dist_calc,
+        omega_m_for_galaxy_dist=DEFAULT_OMEGA_M,
+        num_gw_samples_to_plot=1000,
+        output_dir=OUTPUT_DIR,
+    )
     logger.info(f"\n--- Visualization Script Finished for {current_event_name} ---")
     logger.info("Close all plot windows to exit script fully if plots are blocking.")
     plt.show() # Final show to ensure all non-blocking plots are displayed until closed

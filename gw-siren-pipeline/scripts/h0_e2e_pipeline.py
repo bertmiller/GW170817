@@ -108,6 +108,166 @@ def save_h0_samples_and_print_summary(
         logger.info("Number of candidate host galaxies: %d", num_hosts)
 
 
+def run_full_analysis(
+    event_name: str,
+    perform_mcmc: bool = True,
+    *,
+    nside_skymap: int = NSIDE_SKYMAP,
+    cdf_threshold: float = CDF_THRESHOLD,
+    catalog_type: str = CATALOG_TYPE,
+    host_z_max_fallback: float = HOST_Z_MAX_FALLBACK,
+) -> dict:
+    """Execute the full analysis workflow for a GW event.
+
+    Args:
+        event_name: Name of the gravitational wave event.
+        perform_mcmc: Whether to run the MCMC stage.
+        nside_skymap: HEALPix ``nside`` parameter for sky maps.
+        cdf_threshold: Credible level threshold for the sky mask.
+        catalog_type: Galaxy catalog identifier.
+        host_z_max_fallback: Fallback redshift cut if estimation fails.
+
+    Returns:
+        Dictionary containing intermediate and final data products. If an error
+        occurs, the ``error`` key will contain a message.
+    """
+
+    results = {
+        "event_name": event_name,
+        "nside_skymap": nside_skymap,
+        "cdf_threshold": cdf_threshold,
+        "host_z_max": None,
+        "prob_map": None,
+        "sky_mask": None,
+        "sky_map_threshold_val": None,
+        "glade_raw_df": None,
+        "glade_cleaned_df": None,
+        "spatially_selected_hosts_df": None,
+        "redshift_filtered_hosts_df": None,
+        "candidate_hosts_df": None,
+        "sampler": None,
+        "flat_h0_samples": None,
+        "error": None,
+    }
+
+    try:
+        cache_dir = configure_astropy_cache(DEFAULT_CACHE_DIR_NAME)
+        if not cache_dir:
+            raise RuntimeError("Failed to configure astropy cache")
+
+        success, gw_data_obj = fetch_candidate_data(event_name, cache_dir)
+        if not success:
+            raise RuntimeError(f"Failed to fetch GW data: {gw_data_obj}")
+
+        dL_samples, ra_samples, dec_samples = extract_gw_event_parameters(
+            gw_data_obj, event_name
+        )
+        if dL_samples is None or ra_samples is None or dec_samples is None:
+            raise RuntimeError("Essential GW parameters are missing")
+        results["dL_samples"] = dL_samples
+        results["ra_samples"] = ra_samples
+        results["dec_samples"] = dec_samples
+
+        host_z_max = estimate_event_specific_z_max(dL_samples)
+        if host_z_max is None:
+            host_z_max = host_z_max_fallback
+        results["host_z_max"] = host_z_max
+
+        prob_map, sky_mask, threshold = generate_sky_map_and_credible_region(
+            ra_samples,
+            dec_samples,
+            nside=nside_skymap,
+            cdf_threshold=cdf_threshold,
+        )
+        results["prob_map"] = prob_map
+        results["sky_mask"] = sky_mask
+        results["sky_map_threshold_val"] = threshold
+
+        glade_raw = download_and_load_galaxy_catalog(catalog_type=catalog_type)
+        if glade_raw.empty:
+            raise RuntimeError("Galaxy catalogue failed to load")
+        results["glade_raw_df"] = glade_raw
+
+        glade_clean = clean_galaxy_catalog(
+            glade_raw, range_filters=DEFAULT_RANGE_CHECKS
+        )
+        if glade_clean.empty:
+            raise RuntimeError("Galaxy catalogue empty after cleaning")
+        results["glade_cleaned_df"] = glade_clean
+
+        if sky_mask.any():
+            spatial_hosts = select_galaxies_in_sky_region(
+                glade_clean, sky_mask, nside=nside_skymap
+            )
+        else:
+            logger.warning("Sky mask empty. Selecting hosts from full catalogue.")
+            spatial_hosts = glade_clean
+        if spatial_hosts.empty:
+            raise RuntimeError("No galaxies found in sky region")
+        results["spatially_selected_hosts_df"] = spatial_hosts
+
+        redshift_filtered = filter_galaxies_by_redshift(spatial_hosts, host_z_max)
+        if redshift_filtered.empty:
+            raise RuntimeError("No galaxies remaining after redshift cut")
+        results["redshift_filtered_hosts_df"] = redshift_filtered
+
+        candidate_hosts = apply_specific_galaxy_corrections(
+            redshift_filtered, event_name, DEFAULT_GALAXY_CORRECTIONS
+        )
+        if candidate_hosts.empty:
+            raise RuntimeError("No candidate host galaxies available after corrections")
+        results["candidate_hosts_df"] = candidate_hosts
+
+        if perform_mcmc:
+            log_likelihood = get_log_likelihood_h0(
+                dL_samples,
+                candidate_hosts["z"].values,
+                candidate_hosts["mass_proxy"].values,
+                DEFAULT_SIGMA_V_PEC,
+                DEFAULT_C_LIGHT,
+                DEFAULT_OMEGA_M,
+                DEFAULT_H0_PRIOR_MIN,
+                DEFAULT_H0_PRIOR_MAX,
+                DEFAULT_ALPHA_PRIOR_MIN,
+                DEFAULT_ALPHA_PRIOR_MAX,
+            )
+
+            n_cores = os.cpu_count() or 1
+            with InterruptiblePool(n_cores) as pool:
+                sampler = run_mcmc_h0(
+                    log_likelihood,
+                    event_name,
+                    n_walkers=DEFAULT_MCMC_N_WALKERS,
+                    n_dim=DEFAULT_MCMC_N_DIM,
+                    initial_h0_mean=DEFAULT_MCMC_INITIAL_H0_MEAN,
+                    initial_h0_std=DEFAULT_MCMC_INITIAL_H0_STD,
+                    alpha_prior_min=DEFAULT_ALPHA_PRIOR_MIN,
+                    alpha_prior_max=DEFAULT_ALPHA_PRIOR_MAX,
+                    n_steps=DEFAULT_MCMC_N_STEPS,
+                    pool=pool,
+                )
+            if sampler is None:
+                raise RuntimeError("MCMC failed")
+            results["sampler"] = sampler
+
+            flat_samples = process_mcmc_samples(
+                sampler,
+                event_name,
+                burnin=DEFAULT_MCMC_BURNIN,
+                thin_by=DEFAULT_MCMC_THIN_BY,
+                n_dim=DEFAULT_MCMC_N_DIM,
+            )
+            if flat_samples is None:
+                raise RuntimeError("No samples produced by MCMC")
+            results["flat_h0_samples"] = flat_samples
+    except Exception as exc:
+        logger.error("Error during analysis for %s: %s", event_name, exc)
+        results["error"] = str(exc)
+
+    return results
+
+
+
 def main() -> None:
     """Run the end-to-end analysis pipeline."""
     parser = argparse.ArgumentParser(description="Run H0 estimation pipeline")
@@ -132,119 +292,21 @@ def main() -> None:
     )
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    cache_dir = configure_astropy_cache(DEFAULT_CACHE_DIR_NAME)
-    if not cache_dir:
-        logger.critical("Failed to configure astropy cache.")
-        sys.exit(1)
 
     event_name = args.event_name
     logger.info("Starting analysis for %s", event_name)
 
-    success, gw_data_obj = fetch_candidate_data(event_name, cache_dir)
-    if not success:
-        logger.error("Failed to fetch GW data: %s", gw_data_obj)
+    results = run_full_analysis(event_name, perform_mcmc=True)
+    if results.get("error"):
+        logger.error("Pipeline failed: %s", results["error"])
         sys.exit(1)
 
-    dL_samples, ra_samples, dec_samples = extract_gw_event_parameters(
-        gw_data_obj, event_name
-    )
-    if dL_samples is None or ra_samples is None or dec_samples is None:
-        logger.error("Essential GW parameters are missing. Exiting.")
-        sys.exit(1)
-
-    host_z_max = estimate_event_specific_z_max(
-        dL_samples,
-        percentile_dL=95.0,
-        z_margin_factor=1.2,
-        min_z_max_val=0.01,
-        max_z_max_val=0.3,
-    )
-    logger.info("Using host_z_max=%.4f", host_z_max)
-
-    prob_map, sky_mask, _ = generate_sky_map_and_credible_region(
-        ra_samples, dec_samples, nside=NSIDE_SKYMAP, cdf_threshold=CDF_THRESHOLD
-    )
-
-    glade_raw = download_and_load_galaxy_catalog(catalog_type=CATALOG_TYPE)
-    if glade_raw.empty:
-        logger.error("Galaxy catalogue failed to load.")
-        sys.exit(1)
-
-    glade_clean = clean_galaxy_catalog(glade_raw, range_filters=DEFAULT_RANGE_CHECKS)
-    if glade_clean.empty:
-        logger.error("Galaxy catalogue empty after cleaning.")
-        sys.exit(1)
-
-    if sky_mask.any():
-        spatial_hosts = select_galaxies_in_sky_region(
-            glade_clean, sky_mask, nside=NSIDE_SKYMAP
+    if results.get("flat_h0_samples") is not None:
+        hosts_df = results.get("candidate_hosts_df")
+        num_hosts = len(hosts_df) if isinstance(hosts_df, pd.DataFrame) else 0
+        save_h0_samples_and_print_summary(
+            results["flat_h0_samples"], event_name, num_hosts
         )
-    else:
-        logger.warning("Sky mask empty. Selecting hosts from full catalogue.")
-        spatial_hosts = glade_clean
-
-    if spatial_hosts.empty:
-        logger.error("No galaxies found in sky region.")
-        sys.exit(1)
-
-    redshift_filtered = filter_galaxies_by_redshift(spatial_hosts, host_z_max)
-    if redshift_filtered.empty:
-        logger.error("No galaxies remaining after redshift cut.")
-        sys.exit(1)
-
-    candidate_hosts = apply_specific_galaxy_corrections(
-        redshift_filtered, event_name, DEFAULT_GALAXY_CORRECTIONS
-    )
-    if candidate_hosts.empty:
-        logger.error("No candidate host galaxies available after corrections.")
-        sys.exit(1)
-
-    logger.info("%d candidate host galaxies identified", len(candidate_hosts))
-
-    log_likelihood = get_log_likelihood_h0(
-        dL_samples,
-        candidate_hosts["z"].values,
-        candidate_hosts["mass_proxy"].values,
-        DEFAULT_SIGMA_V_PEC,
-        DEFAULT_C_LIGHT,
-        DEFAULT_OMEGA_M,
-        DEFAULT_H0_PRIOR_MIN,
-        DEFAULT_H0_PRIOR_MAX,
-        DEFAULT_ALPHA_PRIOR_MIN,
-        DEFAULT_ALPHA_PRIOR_MAX,
-    )
-
-    n_cores = os.cpu_count() or 1
-    with InterruptiblePool(n_cores) as pool:
-        sampler = run_mcmc_h0(
-            log_likelihood,
-            event_name,
-            n_walkers=DEFAULT_MCMC_N_WALKERS,
-            n_dim=DEFAULT_MCMC_N_DIM,
-            initial_h0_mean=DEFAULT_MCMC_INITIAL_H0_MEAN,
-            initial_h0_std=DEFAULT_MCMC_INITIAL_H0_STD,
-            alpha_prior_min=DEFAULT_ALPHA_PRIOR_MIN,
-            alpha_prior_max=DEFAULT_ALPHA_PRIOR_MAX,
-            n_steps=DEFAULT_MCMC_N_STEPS,
-            pool=pool,
-        )
-
-    if sampler is None:
-        logger.error("MCMC failed.")
-        sys.exit(1)
-
-    flat_samples = process_mcmc_samples(
-        sampler,
-        event_name,
-        burnin=DEFAULT_MCMC_BURNIN,
-        thin_by=DEFAULT_MCMC_THIN_BY,
-        n_dim=DEFAULT_MCMC_N_DIM,
-    )
-    if flat_samples is None:
-        logger.error("No samples produced by MCMC.")
-        sys.exit(1)
-
-    save_h0_samples_and_print_summary(flat_samples, event_name, len(candidate_hosts))
     logger.info("Analysis completed for %s", event_name)
 
 
