@@ -147,7 +147,7 @@ def run_full_analysis(
     }
 
     try:
-        cache_dir = configure_astropy_cache(DEFAULT_CACHE_DIR_NAME)
+        cache_dir = configure_astropy_cache(CONFIG.fetcher["cache_dir_name"])
         if not cache_dir:
             raise RuntimeError("Failed to configure astropy cache")
 
