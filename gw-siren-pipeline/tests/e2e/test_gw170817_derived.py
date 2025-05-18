@@ -8,16 +8,22 @@ import pandas as pd
 def test_e2e_gw170817_pipeline_with_derived_data(mocker, mock_config, tmp_path):
     """Run the H0 pipeline using pre-derived GW170817 mock data."""
     event_name = "GW170817"
+    
+    # Import pipeline after config fixture patched CONFIG
     pipeline = importlib.import_module("scripts.h0_e2e_pipeline")
+    pipeline_mod = importlib.import_module("gwsiren.pipeline")
+    h0_mcmc_analyzer_mod = importlib.import_module("gwsiren.h0_mcmc_analyzer")
 
-    # Direct all pipeline output to the temporary directory
+    # Ensure pipeline uses temporary output directory
     mocker.patch.object(pipeline, "OUTPUT_DIR", str(tmp_path))
+    mocker.patch.object(pipeline_mod, "OUTPUT_DIR", str(tmp_path))
+
+    # Mock cache configuration
     mocker.patch.object(
-        pipeline,
+        pipeline_mod,
         "configure_astropy_cache",
         return_value=str(tmp_path / "cache"),
     )
-
     # Derived GW samples
     derived_ra_deg = np.full(75, 197.45042353)
     derived_dec_deg = np.full(75, -23.38149089)
@@ -109,47 +115,44 @@ def test_e2e_gw170817_pipeline_with_derived_data(mocker, mock_config, tmp_path):
         }
     )
 
-    # Mock data fetching and extraction
+    # Mock data fetching and extraction - target gwsiren.pipeline
     mock_gw_obj = MagicMock()
-    mocker.patch.object(
-        pipeline,
-        "fetch_candidate_data",
+    mocker.patch(
+        "gwsiren.pipeline.fetch_candidate_data",
         return_value=(True, mock_gw_obj),
     )
-    mocker.patch.object(
-        pipeline,
-        "extract_gw_event_parameters",
+    mocker.patch(
+        "gwsiren.pipeline.extract_gw_event_parameters",
         return_value=(derived_dl_mpc, derived_ra_deg, derived_dec_deg),
     )
 
-    # Mock galaxy catalog functions
-    mocker.patch.object(
-        pipeline,
-        "download_and_load_galaxy_catalog",
+    # Mock galaxy catalog functions - target gwsiren.pipeline
+    mocker.patch(
+        "gwsiren.pipeline.download_and_load_galaxy_catalog",
         return_value=derived_galaxy_subset_df,
     )
-    mocker.patch.object(
-        pipeline,
-        "clean_galaxy_catalog",
+    mocker.patch(
+        "gwsiren.pipeline.clean_galaxy_catalog",
         return_value=derived_galaxy_subset_df,
     )
-    mocker.patch.object(
-        pipeline,
-        "apply_specific_galaxy_corrections",
+    mocker.patch(
+        "gwsiren.pipeline.apply_specific_galaxy_corrections",
         side_effect=lambda df, *args, **kwargs: df,
     )
 
-    # Patch MCMC parameters for a quick run
+    # Patch MCMC parameters for a quick run - target gwsiren.h0_mcmc_analyzer
     test_n_walkers = 8
     test_n_steps = 50
     test_burnin = 10
     test_thin_by = 2
-    mocker.patch.object(pipeline, "DEFAULT_MCMC_N_WALKERS", test_n_walkers)
-    mocker.patch.object(pipeline, "DEFAULT_MCMC_N_STEPS", test_n_steps)
-    mocker.patch.object(pipeline, "DEFAULT_MCMC_BURNIN", test_burnin)
-    mocker.patch.object(pipeline, "DEFAULT_MCMC_THIN_BY", test_thin_by)
+    mocker.patch("gwsiren.h0_mcmc_analyzer.DEFAULT_MCMC_N_WALKERS", test_n_walkers)
+    mocker.patch("gwsiren.h0_mcmc_analyzer.DEFAULT_MCMC_N_STEPS", test_n_steps)
+    mocker.patch("gwsiren.h0_mcmc_analyzer.DEFAULT_MCMC_BURNIN", test_burnin)
+    mocker.patch("gwsiren.h0_mcmc_analyzer.DEFAULT_MCMC_THIN_BY", test_thin_by)
 
-    # Avoid creating real multiprocessing pools
+    # Avoid creating real multiprocessing pools - target gwsiren.pipeline
+    # as InterruptiblePool is imported in gwsiren.pipeline and likely used from there
+    # by h0_mcmc_analyzer, consistent with test_h0_e2e_pipeline.py
     class DummyPool:
         def __init__(self, *args, **kwargs):
             pass
@@ -160,7 +163,7 @@ def test_e2e_gw170817_pipeline_with_derived_data(mocker, mock_config, tmp_path):
         def __exit__(self, exc_type, exc_val, exc_tb):
             pass
 
-    mocker.patch.object(pipeline, "InterruptiblePool", DummyPool)
+    mocker.patch("gwsiren.pipeline.InterruptiblePool", DummyPool)
 
     results = pipeline.run_full_analysis(
         event_name,
@@ -184,8 +187,8 @@ def test_e2e_gw170817_pipeline_with_derived_data(mocker, mock_config, tmp_path):
     h0_median = float(np.median(flat_samples[:, 0]))
     alpha_median = float(np.median(flat_samples[:, 1]))
     assert np.isfinite(h0_median) and 10 < h0_median < 200
-    alpha_min = pipeline.DEFAULT_ALPHA_PRIOR_MIN
-    alpha_max = pipeline.DEFAULT_ALPHA_PRIOR_MAX
+    alpha_min = h0_mcmc_analyzer_mod.DEFAULT_ALPHA_PRIOR_MIN
+    alpha_max = h0_mcmc_analyzer_mod.DEFAULT_ALPHA_PRIOR_MAX
     assert np.isfinite(alpha_median)
     assert alpha_min <= alpha_median <= alpha_max
 
