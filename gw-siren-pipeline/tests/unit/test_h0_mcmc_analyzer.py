@@ -46,6 +46,41 @@ class FakeArray:
         return iter(self._values)
 
 
+# Test cases for verifying weight application in H0LogLikelihood
+WEIGHT_TEST_CASES_FOR_LIKELIHOOD = [
+    (
+        "flat_prior_alpha_0",
+        np.array([10.0, 20.0, 70.0]),
+        0.0,
+        0.0,
+    ),
+    (
+        "mass_proportional_alpha_1",
+        np.array([10.0, 30.0, 60.0]),
+        1.0,
+        0.0,
+    ),
+    (
+        "inverse_mass_proportional_alpha_neg1",
+        np.array([10.0, 20.0, 100.0]),
+        -1.0,
+        0.0,
+    ),
+    (
+        "fractional_alpha_dominant_mass",
+        np.array([1.0, 1.0, 100.0]),
+        0.5,
+        0.0,
+    ),
+    (
+        "all_equal_masses_any_alpha",
+        np.array([50.0, 50.0, 50.0, 50.0]),
+        0.8,
+        0.0,
+    ),
+]
+
+
 def test_H0LogLikelihood_init_success(mock_config):
     dL_gw_samples = np.array([100.0, 150.0])
     host_z = np.array([0.02, 0.03])
@@ -180,3 +215,32 @@ def test_get_log_likelihood_passes_other_args_correctly(mock_config):
     assert instance.h0_min == 20
     assert instance.h0_max == 180
     assert instance.omega_m_val == 0.25
+
+
+@pytest.mark.parametrize(
+    "test_name, mass_proxy_values, alpha_input, expected_log_L",
+    WEIGHT_TEST_CASES_FOR_LIKELIHOOD,
+)
+def test_h0_loglikelihood_weight_application(
+    test_name,
+    mass_proxy_values,
+    alpha_input,
+    expected_log_L,
+    mock_config,
+    mocker,
+):
+    """Verify that galaxy weights are correctly applied in the log-likelihood."""
+
+    dL_gw_samples = np.array([100.0])
+    host_z = np.full(len(mass_proxy_values), 0.1)
+
+    likelihood = H0LogLikelihood(dL_gw_samples, host_z, mass_proxy_values)
+
+    # Force per-galaxy log likelihood terms to zero so only weights matter
+    mocker.patch(
+        "gwsiren.h0_mcmc_analyzer.norm.logpdf",
+        side_effect=lambda x, loc=None, scale=None: np.zeros_like(x),
+    )
+
+    actual_log_L = likelihood([70.0, alpha_input])
+    assert np.isclose(actual_log_L, expected_log_L)
