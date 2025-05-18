@@ -40,7 +40,7 @@ logging.basicConfig(
 # Import from gwsiren package
 from gwsiren.gw_data_fetcher import fetch_candidate_data, configure_astropy_cache, DEFAULT_CACHE_DIR_NAME
 from gwsiren.event_data_extractor import extract_gw_event_parameters
-from h0_e2e_pipeline import run_full_analysis  # Using absolute import since we're in the same directory
+from gwsiren.pipeline import run_full_analysis
 
 # Galaxy Catalog Handling
 from gwsiren.data.catalogs import (
