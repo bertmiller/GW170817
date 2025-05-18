@@ -18,6 +18,13 @@ CATALOG_CONFIGS = {
         # PGC(col 2), RA(col 9), Dec(col 10), z_helio(col 28), placeholder mass proxy column
         'use_cols': [1, 8, 9, 27, 35],
         'col_names': ['PGC', 'ra', 'dec', 'z', 'mass_proxy'],
+        'dtypes': {
+            'PGC': 'int32',
+            'ra': 'float32',
+            'dec': 'float32',
+            'z': 'float32',
+            'mass_proxy': 'float32',
+        },
         'na_vals': ['-99.0', '-999.0', '-9999.0', 'NaN', 'NAN', 'nan', 'NULL', 'null', '', 'N/A', 'n/a', 'None', '...', 'no_value'],
         'display_name': "GLADE+"
     },
@@ -27,6 +34,13 @@ CATALOG_CONFIGS = {
         # PGC, RA, Dec, z, placeholder mass proxy column
         'use_cols': [0, 6, 7, 15, 35],
         'col_names': ['PGC', 'ra', 'dec', 'z', 'mass_proxy'],
+        'dtypes': {
+            'PGC': 'int32',
+            'ra': 'float32',
+            'dec': 'float32',
+            'z': 'float32',
+            'mass_proxy': 'float32',
+        },
         'na_vals': ['-99.0', '-999.0', '-9999.0', 'NaN', 'NAN', 'nan', 'NULL', 'null', '', 'N/A', 'n/a', 'None', '...', 'no_value'],
         'display_name': "GLADE 2.4"
     }
@@ -61,6 +75,10 @@ def download_and_load_galaxy_catalog(catalog_type='glade+'):
 
     Returns:
         pd.DataFrame: Loaded galaxy catalog, or an empty DataFrame on failure.
+
+    Notes:
+        Explicit dtypes are used when reading to minimize parsing overhead and
+        memory usage for large catalogs like GLADE+.
     """
     config = CATALOG_CONFIGS.get(catalog_type.lower())
 
@@ -72,6 +90,7 @@ def download_and_load_galaxy_catalog(catalog_type='glade+'):
     base_filename = config['filename'] # Renamed from filename to base_filename
     use_cols = config['use_cols']
     col_names = config['col_names']
+    dtypes = config.get('dtypes')
     na_vals = config['na_vals']
     catalog_name_print = config['display_name']
 
@@ -95,6 +114,7 @@ def download_and_load_galaxy_catalog(catalog_type='glade+'):
             sep=r"\s+",
             usecols=use_cols,
             names=col_names,
+            dtype=dtypes,
             comment='#',
             low_memory=False,
             na_values=na_vals,
