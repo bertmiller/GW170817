@@ -17,34 +17,32 @@ The goal of this project is to create scalable pipelines for analyzing GW events
 
 ## 2. Codebase Structure
 
-- **`gwsiren/`**: Core package containing all reusable modules.
-  - `__init__.py`: Package initializer.
-  - `config.py`: Handles loading project-wide configurations from `config.yaml`.
-  - `gw_data_fetcher.py`: Fetches GW event data.
-  - `event_data_extractor.py`: Extracts data from GW event objects.
-  - `sky_analyzer.py`: Handles sky localization and galaxy selection logic.
-  - `h0_mcmc_analyzer.py`: Implements H0 likelihood and MCMC logic.
-  - `plot_utils.py`: Utility functions for plotting.
-  - `data/`: Subpackage for data handling.
-    - `catalogs.py`: Manages galaxy catalog operations.
-    - `__init__.py`: Subpackage initializer.
+**`gw-siren-pipeline/`** – Package directory containing the Python code and configuration files.
+  - **`gwsiren/`** – Core library modules.
+    - `__init__.py`: Package initializer.
+    - `config.py`: Loads configuration from `config.yaml`.
+    - `gw_data_fetcher.py`: Fetches GW event data.
+    - `event_data_extractor.py`: Extracts data from GW event objects.
+    - `sky_analyzer.py`: Handles sky localization and galaxy selection logic.
+    - `h0_mcmc_analyzer.py`: Implements H0 likelihood and MCMC logic.
+    - `pipeline.py`: High-level workflow for running the full analysis.
+    - `plot_utils.py`: Utility functions for plotting.
+    - `data/`: Subpackage for data handling.
+      - `catalogs.py`: Manages galaxy catalog operations.
+      - `__init__.py`: Subpackage initializer.
+  - **`scripts/`** – Executable scripts.
+    - `h0_e2e_pipeline.py`: End-to-end pipeline driver.
+    - `viz.py`: Visualization script.
+    - `analyze_candidates.py`: Analyze multiple GW candidates.
+  - **`tests/`** – Unit, integration, and end-to-end tests.
+  - `config.yaml`: Central configuration file used by the package.
 
-- **`scripts/`**: Contains executable scripts for analysis.
-  - `h0_e2e_pipeline.py`: Main end-to-end pipeline for H0 analysis.
-  - `viz.py`: Comprehensive visualization script.
-  - `analyze_candidates.py`: Script for analyzing multiple GW candidates (no MCMC).
-
-- **`tests/`**: Contains all tests for the project.
-  - `unit/`: Unit tests for individual modules and functions.
-  - `integration/`: Tests for interactions between modules.
-  - `e2e/`: End-to-end tests for main analysis scripts.
-  - `conftest.py`: Common `pytest` fixtures.
-
-- **`config.yaml`**: (In project root) Central configuration file for URLs, paths, and parameters. **Always prefer using values from this config over hardcoding.**
+The repository root also contains a `tests/` directory with a `conftest.py` that
+loads the package fixtures so running `pytest` from the top level works.
 
 ## 3. Configuration Management
 
-- All global configurations (URLs, default parameters, file paths, MCMC settings) are managed via `config.yaml` in the project root.
+- All global configurations (URLs, default parameters, file paths, MCMC settings) are managed via `gw-siren-pipeline/config.yaml`.
 - The `gwsiren.CONFIG` object (loaded by `gwsiren.config.load_config()`) provides access to these configurations.
 - When writing code, **access configuration values via `gwsiren.CONFIG`** (e.g., `from gwsiren import CONFIG; data_dir = CONFIG.catalog["data_dir"]`).
 - When writing tests, use the `mock_config` fixture (from `tests/conftest.py`) to provide a controlled, temporary configuration environment. This fixture ensures that `gwsiren.CONFIG` and direct `CONFIG` imports in other modules are patched to use the mock settings.
