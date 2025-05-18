@@ -74,7 +74,7 @@ def test_load_glade_plus_from_local_mock_file(mock_config, caplog, monkeypatch):
         log_step("Performing assertions")
         assert not df.empty, "DataFrame should not be empty"
         assert len(df) == 10, f"Should have exactly 10 rows from test_GLADE+.txt, got {len(df)}"
-        assert list(df.columns) == ['PGC', 'ra', 'dec', 'z', 'mass_proxy'], "Column names should match expected"
+        assert list(df.columns) == ['PGC', 'ra', 'dec', 'z', 'z_err', 'mass_proxy'], "Column names should match expected"
         # Check a few sample values for correctness
         first_row = df.iloc[0]
         assert first_row['PGC'] == 43495, "First row PGC should match test data"
@@ -86,11 +86,12 @@ def test_load_glade_plus_from_local_mock_file(mock_config, caplog, monkeypatch):
         assert pd.api.types.is_numeric_dtype(df['mass_proxy']), "mass_proxy should be numeric"
         # verify expected dtypes were applied when reading
         expected_dtype = {
-            'PGC': 'int32',
-            'ra': 'float32',
-            'dec': 'float32',
-            'z': 'float32',
-            'mass_proxy': 'float32',
+            'PGC': 'int64',
+            'ra': 'float64',
+            'dec': 'float64',
+            'z': 'float64',
+            'z_err': 'float64',
+            'mass_proxy': 'float64',
         }
         for col, dtype in expected_dtype.items():
             assert df[col].dtype == dtype
