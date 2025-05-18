@@ -133,8 +133,17 @@ def clean_galaxy_catalog(glade_df, numeric_cols=['PGC', 'ra', 'dec', 'z'], cols_
             logger.warning(f"⚠️ Warning: Column {c} not found for numeric conversion during cleaning.")
 
     initial_count = len(df_cleaned)
-    df_cleaned = df_cleaned.dropna(subset=cols_to_dropna)
-    logger.info(f"  {len(df_cleaned):,} galaxies kept after dropping NaNs in {cols_to_dropna} (from {initial_count}).")
+    # Only attempt to drop NaNs for columns that actually exist
+    subset_for_dropna = [c for c in cols_to_dropna if c in df_cleaned.columns]
+    missing_drop_cols = set(cols_to_dropna) - set(subset_for_dropna)
+    if missing_drop_cols:
+        logger.warning(
+            f"⚠ Columns {sorted(missing_drop_cols)} missing for dropna during cleaning."
+        )
+    df_cleaned = df_cleaned.dropna(subset=subset_for_dropna)
+    logger.info(
+        f"  {len(df_cleaned):,} galaxies kept after dropping NaNs in {subset_for_dropna} (from {initial_count})."
+    )
 
     if df_cleaned.empty:
         logger.info("  No galaxies remaining after dropping NaNs. Cannot proceed with range checks.")
