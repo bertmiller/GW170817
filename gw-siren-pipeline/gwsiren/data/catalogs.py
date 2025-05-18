@@ -107,7 +107,7 @@ def download_and_load_galaxy_catalog(catalog_type='glade+'):
 
 def clean_galaxy_catalog(
     glade_df,
-    numeric_cols=['PGC', 'ra', 'dec', 'z', 'mass_proxy'],
+    numeric_cols=['PGC', 'ra', 'dec', 'z', 'z_err', 'mass_proxy'],
     cols_to_dropna=['ra', 'dec', 'z', 'mass_proxy'],
     range_filters=DEFAULT_RANGE_CHECKS,
 ):
@@ -119,12 +119,16 @@ def clean_galaxy_catalog(
     Args:
         glade_df (pd.DataFrame): The raw galaxy catalog DataFrame.
         numeric_cols (list): Columns to convert to numeric. Defaults include
-            ``'mass_proxy'`` which should represent a positive, linear proxy for
-            stellar mass.
+            ``'z_err'`` and ``'mass_proxy'`` which should represent positive,
+            linear quantities (``'mass_proxy'`` being a proxy for stellar mass).
         cols_to_dropna (list): Columns where NaNs should be dropped. ``'mass_proxy'``
             is included by default so galaxies lacking this information are removed.
         range_filters (dict): Dictionary with min/max values for 'ra', 'dec', 'z'.
                               Example: {'dec_min': -90, 'dec_max': 90, ...}
+
+    Notes:
+        After initial cleaning, galaxies lacking a valid, positive ``z_err``
+        value will have one imputed using ``0.015 * (1 + z)``.
 
     Returns:
         pd.DataFrame: Cleaned galaxy catalog, or an empty DataFrame if all rows are dropped.
@@ -160,6 +164,34 @@ def clean_galaxy_catalog(
     logger.info(
         f"  {len(df_cleaned):,} galaxies kept after dropping NaNs in {subset_for_dropna} (from {initial_count})."
     )
+
+    # ------------------------------------------------------------------
+    # Fallback handling for missing or non-positive z_err values
+    # ------------------------------------------------------------------
+    if "z_err" in df_cleaned.columns and "z" in df_cleaned.columns:
+        fallback_mask = df_cleaned["z_err"].isna() | (df_cleaned["z_err"] <= 0)
+        valid_z_mask = df_cleaned["z"].notna()
+        apply_mask = fallback_mask & valid_z_mask
+        num_fallback = int(apply_mask.sum())
+        if num_fallback > 0:
+            logger.info(f"Applying z_err fallback for {num_fallback} galaxies...")
+            df_cleaned.loc[apply_mask, "z_err"] = 0.015 * (
+                1 + df_cleaned.loc[apply_mask, "z"]
+            )
+            floor_mask = apply_mask & (
+                df_cleaned["z_err"].isna() | (df_cleaned["z_err"] <= 0)
+            )
+            num_floor = int(floor_mask.sum())
+            if num_floor > 0:
+                logger.info(
+                    f"Applying z_err floor for an additional {num_floor} galaxies after fallback calculation."
+                )
+                df_cleaned.loc[floor_mask, "z_err"] = 0.001
+            logger.info("Finished applying z_err fallback logic.")
+    else:
+        logger.warning(
+            "'z_err' or 'z' column not found or not suitable for fallback. Cannot apply z_err fallback logic."
+        )
 
     if df_cleaned.empty:
         logger.info("  No galaxies remaining after dropping NaNs. Cannot proceed with range checks.")
