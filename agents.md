@@ -129,6 +129,7 @@ The goal of this project is to create scalable pipelines for analyzing GW events
 ## 9. Data Handling Conventions
 
 - **Galaxy Catalogs**: Expect columns like 'PGC', 'ra', 'dec', 'z'. See `gwsiren.data.catalogs` for details on column names and types after cleaning.
+- **GLADE+ Database**: The GLADE+ database has a detailed column description at the bottom of this file. Always refer to the "GLADE+ DATABASE DESCRIPTION" section for accurate column names, indices, and descriptions. This ensures that your code correctly maps and processes the data.
 - **Sky Coordinates**:
   - Posterior samples (e.g., from `pesummary`) often have RA/Dec in radians. Convert to degrees for sky map generation (`healpy.ang2pix` often expects degrees if `lonlat=True`).
   - Galaxy catalog coordinates are typically in degrees.
