@@ -44,6 +44,26 @@ def test_clean_numeric_conversion_and_coercion():
     pd.testing.assert_frame_equal(cleaned.reset_index(drop=True), expected)
 
 
+def test_clean_z_err_fallback():
+    df = pd.DataFrame(
+        {
+            "PGC": [1, 2, 3],
+            "ra": [10.0, 20.0, 30.0],
+            "dec": [0.0, 1.0, -1.0],
+            "z": [0.01, 0.02, 0.03],
+            "z_err": [np.nan, -0.5, 0.005],
+            "mass_proxy": [1, 1, 1],
+        }
+    )
+
+    cleaned = clean_galaxy_catalog(df)
+
+    assert len(cleaned) == 3
+    assert np.isclose(cleaned.loc[cleaned["PGC"] == 1, "z_err"].iloc[0], 0.015 * (1 + 0.01))
+    assert np.isclose(cleaned.loc[cleaned["PGC"] == 2, "z_err"].iloc[0], 0.015 * (1 + 0.02))
+    assert np.isclose(cleaned.loc[cleaned["PGC"] == 3, "z_err"].iloc[0], 0.005)
+
+
 def test_clean_dropna_specific_columns():
     df = pd.DataFrame(
         {
