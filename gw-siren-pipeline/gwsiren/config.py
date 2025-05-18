@@ -1,5 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
+import os
 import pathlib
 
 # Try to import PyYAML, fall back to a very small parser if unavailable
@@ -54,11 +55,15 @@ def load_config(path: str | pathlib.Path | None = None) -> Config:
     Args:
         path: Path to config file. If None, looks for config.yaml in root directory.
     """
-    if path is None:
-        # Look for config.yaml in root directory (parent of gwsiren package)
-        cfg_path = pathlib.Path(__file__).parent.parent / 'config.yaml'
-    else:
+    if path is not None:
         cfg_path = pathlib.Path(path)
+    else:
+        env_var = os.getenv("GWSIREN_CONFIG")
+        if env_var:
+            cfg_path = pathlib.Path(env_var)
+        else:
+            # Look for config.yaml in root directory (parent of gwsiren package)
+            cfg_path = pathlib.Path(__file__).parent.parent / 'config.yaml'
         
     if not cfg_path.exists():
         raise RuntimeError(f'Config file not found: {cfg_path}')

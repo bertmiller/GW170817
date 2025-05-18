@@ -1,0 +1,22 @@
+name: Python CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+      - name: Install dependencies
+        run: |
+          pip install ./gw-siren-pipeline
+          pip install pytest
+      - name: Run tests
+        env:
+          GWSIREN_CONFIG: ${{ github.workspace }}/gw-siren-pipeline/config.yaml
+        run: pytest
