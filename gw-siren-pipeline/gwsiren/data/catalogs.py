@@ -15,16 +15,18 @@ CATALOG_CONFIGS = {
     'glade+': {
         'url': CONFIG.catalog['glade_plus_url'],
         'filename': "GLADE+.txt",
-        'use_cols': [1, 8, 9, 27],  # PGC(col 2), RA(col 9), Dec(col 10), z_helio(col 28) -> 0-indexed
-        'col_names': ['PGC', 'ra', 'dec', 'z'], # Standardized names
+        # PGC(col 2), RA(col 9), Dec(col 10), z_helio(col 28), placeholder mass proxy column
+        'use_cols': [1, 8, 9, 27, 24],
+        'col_names': ['PGC', 'ra', 'dec', 'z', 'mass_proxy'],
         'na_vals': ['-99.0', '-999.0', '-9999.0', 'NaN', 'NAN', 'nan', 'NULL', 'null', '', 'N/A', 'n/a', 'None', '...', 'no_value'],
         'display_name': "GLADE+"
     },
     'glade24': {
         'url': CONFIG.catalog['glade24_url'],
         'filename': "GLADE_2.4.txt",
-        'use_cols': [0, 6, 7, 15],  # PGC, RA, Dec, z for GLADE 2.4
-        'col_names': ['PGC', 'ra', 'dec', 'z'], # Standardized names
+        # PGC, RA, Dec, z, placeholder mass proxy column
+        'use_cols': [0, 6, 7, 15, 24],
+        'col_names': ['PGC', 'ra', 'dec', 'z', 'mass_proxy'],
         'na_vals': ['-99.0', '-999.0', '-9999.0', 'NaN', 'NAN', 'nan', 'NULL', 'null', '', 'N/A', 'n/a', 'None', '...', 'no_value'],
         'display_name': "GLADE 2.4"
     }
@@ -103,14 +105,24 @@ def download_and_load_galaxy_catalog(catalog_type='glade+'):
         logger.error(f"❌ Error reading {catalog_name_print} catalog: {e}")
         return pd.DataFrame()
 
-def clean_galaxy_catalog(glade_df, numeric_cols=['PGC', 'ra', 'dec', 'z'], cols_to_dropna=['ra', 'dec', 'z'], range_filters=DEFAULT_RANGE_CHECKS):
+def clean_galaxy_catalog(
+    glade_df,
+    numeric_cols=['PGC', 'ra', 'dec', 'z', 'mass_proxy'],
+    cols_to_dropna=['ra', 'dec', 'z', 'mass_proxy'],
+    range_filters=DEFAULT_RANGE_CHECKS,
+):
     """
-    Cleans the galaxy catalog: converts to numeric, drops NaNs, applies range checks.
+    Cleans the galaxy catalog: converts to numeric, drops NaNs, and applies range
+    checks. The function now also supports a ``mass_proxy`` column used for
+    hierarchical host weighting.
 
     Args:
         glade_df (pd.DataFrame): The raw galaxy catalog DataFrame.
-        numeric_cols (list): Columns to convert to numeric.
-        cols_to_dropna (list): Columns where NaNs should be dropped.
+        numeric_cols (list): Columns to convert to numeric. Defaults include
+            ``'mass_proxy'`` which should represent a positive, linear proxy for
+            stellar mass.
+        cols_to_dropna (list): Columns where NaNs should be dropped. ``'mass_proxy'``
+            is included by default so galaxies lacking this information are removed.
         range_filters (dict): Dictionary with min/max values for 'ra', 'dec', 'z'.
                               Example: {'dec_min': -90, 'dec_max': 90, ...}
 
@@ -123,6 +135,10 @@ def clean_galaxy_catalog(glade_df, numeric_cols=['PGC', 'ra', 'dec', 'z'], cols_
 
     logger.info("Cleaning GLADE data...")
     df_cleaned = glade_df.copy()
+
+    # ``mass_proxy`` values are assumed to be provided as a positive, linear
+    # stellar-mass proxy (e.g., flux rather than magnitude). Any transformation
+    # from magnitudes should be applied prior to calling this function.
 
     for c in numeric_cols:
         if c in df_cleaned:

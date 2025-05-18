@@ -56,6 +56,8 @@ from gwsiren.h0_mcmc_analyzer import (
     DEFAULT_MCMC_THIN_BY,
     DEFAULT_H0_PRIOR_MIN,
     DEFAULT_H0_PRIOR_MAX,
+    DEFAULT_ALPHA_PRIOR_MIN,
+    DEFAULT_ALPHA_PRIOR_MAX,
 )
 
 logger = logging.getLogger(__name__)
@@ -69,32 +71,38 @@ HOST_Z_MAX_FALLBACK = 0.05
 
 
 def save_h0_samples_and_print_summary(
-    h0_samples: Iterable[float], event_name: str, num_hosts: int | None = None
+    h0_samples: Iterable[Iterable[float]], event_name: str, num_hosts: int | None = None
 ) -> None:
-    """Save ``H0`` samples and print summary statistics.
-
-    Args:
-        h0_samples: Array of ``H0`` samples.
-        event_name: Name of the gravitational wave event.
-        num_hosts: Optional number of candidate host galaxies used.
-    """
+    """Save posterior samples and print summary statistics for ``H0`` and ``alpha``."""
     samples = np.asarray(h0_samples)
     if samples.size == 0:
-        logger.warning("No H0 samples available for saving.")
+        logger.warning("No MCMC samples available for saving.")
         return
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     out_path = os.path.join(OUTPUT_DIR, f"H0_samples_{event_name}.npy")
     np.save(out_path, samples)
-    logger.info("H0 samples saved to %s", out_path)
+    logger.info("MCMC samples saved to %s", out_path)
 
-    q16, q50, q84 = np.percentile(samples, [16, 50, 84])
+    h0_vals = samples[:, 0]
+    alpha_vals = samples[:, 1]
+
+    q16_h0, q50_h0, q84_h0 = np.percentile(h0_vals, [16, 50, 84])
+    q16_a, q50_a, q84_a = np.percentile(alpha_vals, [16, 50, 84])
+
     logger.info(
         "%s H0 = %.1f +%.1f / -%.1f km s⁻¹ Mpc⁻¹ (68%% C.I.)",
         event_name,
-        q50,
-        q84 - q50,
-        q50 - q16,
+        q50_h0,
+        q84_h0 - q50_h0,
+        q50_h0 - q16_h0,
+    )
+    logger.info(
+        "%s alpha = %.2f +%.2f / -%.2f (68%% C.I.)",
+        event_name,
+        q50_a,
+        q84_a - q50_a,
+        q50_a - q16_a,
     )
     if num_hosts is not None:
         logger.info("Number of candidate host galaxies: %d", num_hosts)
@@ -196,11 +204,14 @@ def main() -> None:
     log_likelihood = get_log_likelihood_h0(
         dL_samples,
         candidate_hosts["z"].values,
+        candidate_hosts["mass_proxy"].values,
         DEFAULT_SIGMA_V_PEC,
         DEFAULT_C_LIGHT,
         DEFAULT_OMEGA_M,
         DEFAULT_H0_PRIOR_MIN,
         DEFAULT_H0_PRIOR_MAX,
+        DEFAULT_ALPHA_PRIOR_MIN,
+        DEFAULT_ALPHA_PRIOR_MAX,
     )
 
     n_cores = os.cpu_count() or 1
@@ -212,6 +223,8 @@ def main() -> None:
             n_dim=DEFAULT_MCMC_N_DIM,
             initial_h0_mean=DEFAULT_MCMC_INITIAL_H0_MEAN,
             initial_h0_std=DEFAULT_MCMC_INITIAL_H0_STD,
+            alpha_prior_min=DEFAULT_ALPHA_PRIOR_MIN,
+            alpha_prior_max=DEFAULT_ALPHA_PRIOR_MAX,
             n_steps=DEFAULT_MCMC_N_STEPS,
             pool=pool,
         )

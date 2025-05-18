@@ -330,37 +330,64 @@ def plot_mcmc_trace(sampler, event_name, burnin_steps, n_walkers_total, mcmc_n_d
     plt.show(block=False); plt.pause(1)
 
 def save_and_plot_h0_posterior_viz(h0_samples, event_name, num_candidate_hosts=None):
-    """Saves H0 samples and plots the posterior distribution (viz.py version)."""
-    if h0_samples is None or len(h0_samples) == 0: logger.warning(f"⚠️ No H0 samples provided for {event_name}. Cannot save or plot posterior."); return
+    """Save MCMC samples and plot 2D posterior for ``H0`` and ``alpha``."""
+    if h0_samples is None or len(h0_samples) == 0:
+        logger.warning("⚠ No samples provided to plotting function.")
+        return
 
     base_filename_samples = f"H0_samples_{event_name}_viz.npy"
-    base_filename_plot = f"H0_posterior_{event_name}_viz.pdf"
+    base_filename_plot = f"H0_alpha_posterior_{event_name}_viz.pdf"
 
     full_output_path_samples = os.path.join(OUTPUT_DIR, base_filename_samples)
     full_output_path_plot = os.path.join(OUTPUT_DIR, base_filename_plot)
 
     np.save(full_output_path_samples, h0_samples)
-    logger.info(f"MCMC H0 samples saved to {full_output_path_samples}")
+    logger.info(f"MCMC samples saved to {full_output_path_samples}")
 
-    q16, q50, q84 = np.percentile(h0_samples, [16, 50, 84]); err_minus = q50 - q16; err_plus = q84 - q50
-    logger.info(f"\n{event_name} H0 (from viz) = {q50:.1f} +{err_plus:.1f} / -{err_minus:.1f} km s⁻¹ Mpc⁻¹ (68% C.I.)")
+    samples = np.asarray(h0_samples)
+    h0_vals = samples[:, 0]
+    alpha_vals = samples[:, 1]
+    q16_h0, q50_h0, q84_h0 = np.percentile(h0_vals, [16, 50, 84])
+    q16_a, q50_a, q84_a = np.percentile(alpha_vals, [16, 50, 84])
+    logger.info(
+        f"\n{event_name} H0 (from viz) = {q50_h0:.1f} +{q84_h0 - q50_h0:.1f} / -{q50_h0 - q16_h0:.1f} km s⁻¹ Mpc⁻¹ (68% C.I.)"
+    )
+    logger.info(
+        f"{event_name} alpha (from viz) = {q50_a:.2f} +{q84_a - q50_a:.2f} / -{q50_a - q16_a:.2f} (68% C.I.)"
+    )
 
-    plt.figure(figsize=(8, 6)); plt.hist(h0_samples, bins=50, density=True, histtype="stepfilled", alpha=0.6, label="Posterior Samples")
-    plt.axvline(q50, color='k', ls='--', label=f'Median: {q50:.1f} km s⁻¹ Mpc⁻¹'); plt.axvline(q16, color='k', ls=':', alpha=0.7); plt.axvline(q84, color='k', ls=':', alpha=0.7)
-    plt.xlabel(r"$H_0\;[\mathrm{km\ s^{-1}\ Mpc^{-1}}]$ "); plt.ylabel("Posterior Density")
-    title_str = f"$H_0$ Posterior - {event_name}"
-    if num_candidate_hosts is not None: title_str += f"\n({num_candidate_hosts:,} Candidate Galaxies)"
-    plt.title(title_str); plt.legend(); plt.grid(True, linestyle=':', alpha=0.5); plt.tight_layout()
-    plt.savefig(full_output_path_plot); logger.info(f"Saved H0 posterior plot: {full_output_path_plot}")
+    fig = corner.corner(
+        samples,
+        labels=[r"$H_0$ (km s$^{-1}$ Mpc$^{-1}$)", r"$\alpha$"],
+        quantiles=[0.16, 0.5, 0.84],
+        show_titles=True,
+    )
+    title_str = f"Posterior - {event_name}"
+    if num_candidate_hosts is not None:
+        fig.suptitle(f"{title_str}\n({num_candidate_hosts:,} Candidate Galaxies)")
+    else:
+        fig.suptitle(title_str)
+
+    fig.tight_layout()
+    try:
+        fig.savefig(full_output_path_plot)
+        logger.info(f"Saved posterior corner plot: {full_output_path_plot}")
+    except Exception as e:
+        logger.error(f"❌ Error saving posterior plot: {e}")
     plt.show(block=False); plt.pause(1)
 
-def create_walker_animation_gif(sampler, n_steps, burnin_steps, event_id,
-                                walker_idx=0,
-                                output_filename_template="{event_id}_walker_{walker_idx}_animation.gif",
-                                plot_interval=10, fps=15):
-    """
-    Creates a GIF animation of a single MCMC walker's path for H0.
-    """
+def create_walker_animation_gif(
+    sampler,
+    n_steps,
+    burnin_steps,
+    event_id,
+    walker_idx=0,
+    output_filename_template="{event_id}_walker_{walker_idx}_animation.gif",
+    plot_interval=10,
+    fps=15,
+    dim_to_plot=0,
+):
+    """Create a GIF animation of a single MCMC walker's path."""
     try:
         full_chain = sampler.get_chain() # Shape: (n_steps, n_walkers, n_dim)
         if walker_idx >= full_chain.shape[1]:
@@ -370,7 +397,7 @@ def create_walker_animation_gif(sampler, n_steps, burnin_steps, event_id,
         if full_chain.ndim < 3 or full_chain.shape[2] == 0 : # n_dim must be at least 1
              logger.error(f"❌ Error: Chain has unexpected dimensions {full_chain.shape} for event {event_id}.")
              return
-        single_walker_h0_history = full_chain[:, walker_idx, 0]
+        single_walker_h0_history = full_chain[:, walker_idx, dim_to_plot]
     except Exception as e:
         logger.error(f"❌ Could not get chain for animation for event {event_id}: {e}")
         return
@@ -409,8 +436,10 @@ def create_walker_animation_gif(sampler, n_steps, burnin_steps, event_id,
     ax.set_xlim(0, effective_n_steps)
     ax.set_ylim(y_min_limit, y_max_limit)
     ax.set_xlabel("MCMC Step Number")
-    ax.set_ylabel("$H_0$ Value (km s⁻¹ Mpc⁻¹)")
-    ax.set_title(f"Path of MCMC Walker {walker_idx} for $H_0$ ({event_id})")
+    ylabel = "$H_0$ Value (km s⁻¹ Mpc⁻¹)" if dim_to_plot == 0 else "$\\alpha$"
+    title_param = "$H_0$" if dim_to_plot == 0 else "$\\alpha$"
+    ax.set_ylabel(ylabel)
+    ax.set_title(f"Path of MCMC Walker {walker_idx} for {title_param} ({event_id})")
     ax.grid(True, alpha=0.3)
 
     # Plot burn-in line only if burnin_steps is within the chain's range
@@ -446,14 +475,15 @@ def create_walker_animation_gif(sampler, n_steps, burnin_steps, event_id,
         
         # Ensure x_data and y_data are indexed correctly up to current_mcmc_step_to_show
         x_data_path = np.arange(0, current_mcmc_step_to_show + 1)
-        y_data_path = single_walker_h0_history[:current_mcmc_step_to_show + 1]
+        y_data_path = single_walker_h0_history[: current_mcmc_step_to_show + 1]
         
         line.set_data(x_data_path, y_data_path)
         
-        current_h0_value = single_walker_h0_history[current_mcmc_step_to_show]
-        point.set_data([current_mcmc_step_to_show], [current_h0_value]) # x needs to be a list/array
-        
-        step_text.set_text(f'Step: {current_mcmc_step_to_show}\n$H_0$: {current_h0_value:.2f}')
+        current_value = single_walker_h0_history[current_mcmc_step_to_show]
+        point.set_data([current_mcmc_step_to_show], [current_value])
+
+        label_param = "$H_0$" if dim_to_plot == 0 else "$\\alpha$"
+        step_text.set_text(f'Step: {current_mcmc_step_to_show}\n{label_param}: {current_value:.2f}')
         return line, point, step_text
 
     num_animation_frames = len(steps_to_plot_indices)

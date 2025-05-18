@@ -1,6 +1,7 @@
 import numpy as np
 import sys
 from scipy.stats import norm
+from scipy.special import logsumexp
 from astropy.cosmology import FlatLambdaCDM
 from astropy import units as u
 import emcee
@@ -18,7 +19,7 @@ DEFAULT_C_LIGHT = CONFIG.cosmology["c_light"]
 DEFAULT_OMEGA_M = CONFIG.cosmology["omega_m"]
 
 # Default MCMC Parameters
-DEFAULT_MCMC_N_DIM = 1
+DEFAULT_MCMC_N_DIM = 2
 DEFAULT_MCMC_N_WALKERS = CONFIG.mcmc["walkers"]
 DEFAULT_MCMC_N_STEPS = CONFIG.mcmc["steps"]
 DEFAULT_MCMC_BURNIN = CONFIG.mcmc["burnin"]
@@ -27,26 +28,60 @@ DEFAULT_MCMC_INITIAL_H0_MEAN = 70.0
 DEFAULT_MCMC_INITIAL_H0_STD = 10.0
 DEFAULT_H0_PRIOR_MIN = CONFIG.mcmc["prior_h0_min"]  # km/s/Mpc
 DEFAULT_H0_PRIOR_MAX = CONFIG.mcmc["prior_h0_max"]  # km/s/Mpc
+DEFAULT_ALPHA_PRIOR_MIN = CONFIG.mcmc.get("prior_alpha_min", -1.0)
+DEFAULT_ALPHA_PRIOR_MAX = CONFIG.mcmc.get("prior_alpha_max", 1.0)
+DEFAULT_MCMC_INITIAL_ALPHA_MEAN = 0.0
+DEFAULT_MCMC_INITIAL_ALPHA_STD = 0.5
 
 class H0LogLikelihood:
-    def __init__(self, dL_gw_samples, host_galaxies_z, 
-                 sigma_v=DEFAULT_SIGMA_V_PEC, 
-                 c_val=DEFAULT_C_LIGHT, 
-                 omega_m_val=DEFAULT_OMEGA_M,
-                 h0_min=DEFAULT_H0_PRIOR_MIN,
-                 h0_max=DEFAULT_H0_PRIOR_MAX,
-                 use_vectorized_likelihood=False):
+    """Log-likelihood for joint inference of ``H0`` and ``alpha``.
+
+    Args:
+        dL_gw_samples: Array of GW luminosity distance samples.
+        host_galaxies_z: Redshifts of candidate host galaxies.
+        host_galaxies_mass_proxy: Positive mass proxy values for the galaxies.
+        sigma_v: Peculiar velocity dispersion in km/s.
+        c_val: Speed of light in km/s.
+        omega_m_val: Matter density parameter.
+        h0_min: Lower prior bound on ``H0``.
+        h0_max: Upper prior bound on ``H0``.
+        alpha_min: Lower prior bound on ``alpha``.
+        alpha_max: Upper prior bound on ``alpha``.
+        use_vectorized_likelihood: Whether to use the vectorised likelihood
+            implementation.
+    """
+    def __init__(
+        self,
+        dL_gw_samples,
+        host_galaxies_z,
+        host_galaxies_mass_proxy,
+        sigma_v=DEFAULT_SIGMA_V_PEC,
+        c_val=DEFAULT_C_LIGHT,
+        omega_m_val=DEFAULT_OMEGA_M,
+        h0_min=DEFAULT_H0_PRIOR_MIN,
+        h0_max=DEFAULT_H0_PRIOR_MAX,
+        alpha_min=DEFAULT_ALPHA_PRIOR_MIN,
+        alpha_max=DEFAULT_ALPHA_PRIOR_MAX,
+        use_vectorized_likelihood=False,
+    ):
         
         if dL_gw_samples is None or len(dL_gw_samples) == 0:
             raise ValueError("dL_gw_samples cannot be None or empty.")
         if host_galaxies_z is None or len(host_galaxies_z) == 0:
             raise ValueError("host_galaxies_z cannot be None or empty.")
+        if host_galaxies_mass_proxy is None or len(host_galaxies_mass_proxy) == 0:
+            raise ValueError("host_galaxies_mass_proxy cannot be None or empty.")
 
         self.dL_gw_samples = np.asarray(dL_gw_samples)
         # Ensure host_galaxies_z is a numpy array for broadcasting
         self.z_values = np.asarray(host_galaxies_z)
+        self.mass_proxy_values = np.asarray(host_galaxies_mass_proxy, dtype=float)
         if self.z_values.ndim == 0: # if it was a single scalar
             self.z_values = np.array([self.z_values])
+        if self.mass_proxy_values.ndim == 0:
+            self.mass_proxy_values = np.array([self.mass_proxy_values])
+        if len(self.mass_proxy_values) != len(self.z_values):
+            raise ValueError("host_galaxies_mass_proxy and host_galaxies_z must have the same length")
         
         self.sigma_v = sigma_v
         self.c_val = c_val
@@ -54,6 +89,8 @@ class H0LogLikelihood:
         self.h0_min = h0_min
         self.h0_max = h0_max
         self.use_vectorized_likelihood = use_vectorized_likelihood
+        self.alpha_min = alpha_min
+        self.alpha_max = alpha_max
 
     def _lum_dist_model(self, z, H0_val):
         cosmo = FlatLambdaCDM(H0=H0_val * u.km / u.s / u.Mpc, Om0=self.omega_m_val)
@@ -152,23 +189,43 @@ class H0LogLikelihood:
             log_sum_over_gw_samples = log_P_data_H0_zi_terms
             # logger.debug(f"log_sum_over_gw_samples (iterative per galaxy) shape: {log_sum_over_gw_samples.shape}, any non-finite: {np.any(~np.isfinite(log_sum_over_gw_samples))}")
 
-        total_log_likelihood = np.logaddexp.reduce(log_sum_over_gw_samples) - np.log(len(self.z_values))
-        # logger.debug(f"total_log_likelihood = {total_log_likelihood}")
-        
+        alpha = theta[1]
+        if not (self.alpha_min <= alpha <= self.alpha_max):
+            return -np.inf
+
+        if np.isclose(alpha, 0.0):
+            weights = np.full(len(self.mass_proxy_values), 1.0 / len(self.mass_proxy_values))
+        else:
+            powered = self.mass_proxy_values ** alpha
+            if np.any(powered <= 0) or not np.all(np.isfinite(powered)):
+                return -np.inf
+            denom = powered.sum()
+            if not np.isfinite(denom) or denom <= 0:
+                return -np.inf
+            weights = powered / denom
+
+        valid_mask = weights > 0
+        if not np.any(valid_mask):
+            return -np.inf
+
+        total_log_likelihood = logsumexp(np.log(weights[valid_mask]) + log_sum_over_gw_samples[valid_mask])
+
         if not np.isfinite(total_log_likelihood):
-            # logger.debug(f"total_log_likelihood is not finite ({total_log_likelihood}) for H0 = {H0}. Returning -inf.")
-            return -np.inf 
-            
+            return -np.inf
+
         return total_log_likelihood
 
 def get_log_likelihood_h0(
-    dL_gw_samples, 
-    host_galaxies_z, 
-    sigma_v=DEFAULT_SIGMA_V_PEC, 
-    c_val=DEFAULT_C_LIGHT, 
+    dL_gw_samples,
+    host_galaxies_z,
+    host_galaxies_mass_proxy,
+    sigma_v=DEFAULT_SIGMA_V_PEC,
+    c_val=DEFAULT_C_LIGHT,
     omega_m_val=DEFAULT_OMEGA_M,
     h0_min=DEFAULT_H0_PRIOR_MIN,
-    h0_max=DEFAULT_H0_PRIOR_MAX
+    h0_max=DEFAULT_H0_PRIOR_MAX,
+    alpha_min=DEFAULT_ALPHA_PRIOR_MIN,
+    alpha_max=DEFAULT_ALPHA_PRIOR_MAX,
 ):
     """
     Returns an instance of the H0LogLikelihood class, dynamically choosing
@@ -177,11 +234,14 @@ def get_log_likelihood_h0(
     Args:
         dL_gw_samples (np.array): Luminosity distance samples from GW event (N_samples,).
         host_galaxies_z (np.array): Redshifts of candidate host galaxies (N_hosts,).
+        host_galaxies_mass_proxy (np.array): Positive mass proxy values for the galaxies.
         sigma_v (float): Peculiar velocity uncertainty (km/s).
         c_val (float): Speed of light (km/s).
         omega_m_val (float): Omega Matter for cosmological calculations.
         h0_min (float): Minimum value for H0 prior.
         h0_max (float): Maximum value for H0 prior.
+        alpha_min (float): Minimum value for alpha prior.
+        alpha_max (float): Maximum value for alpha prior.
 
     Returns:
         H0LogLikelihood: An instance of the H0LogLikelihood class.
@@ -217,37 +277,56 @@ def get_log_likelihood_h0(
         )
 
     return H0LogLikelihood(
-        dL_gw_samples, host_galaxies_z, 
-        sigma_v, c_val, omega_m_val, 
-        h0_min, h0_max,
-        use_vectorized_likelihood=should_use_vectorized 
+        dL_gw_samples,
+        host_galaxies_z,
+        host_galaxies_mass_proxy,
+        sigma_v,
+        c_val,
+        omega_m_val,
+        h0_min,
+        h0_max,
+        alpha_min,
+        alpha_max,
+        use_vectorized_likelihood=should_use_vectorized,
     )
 
-def get_log_likelihood_h0_vectorized( # Helper to specifically get vectorized
+def get_log_likelihood_h0_vectorized(
     dL_gw_samples,
     host_galaxies_z,
+    host_galaxies_mass_proxy,
     sigma_v=DEFAULT_SIGMA_V_PEC,
     c_val=DEFAULT_C_LIGHT,
     omega_m_val=DEFAULT_OMEGA_M,
     h0_min=DEFAULT_H0_PRIOR_MIN,
-    h0_max=DEFAULT_H0_PRIOR_MAX
+    h0_max=DEFAULT_H0_PRIOR_MAX,
+    alpha_min=DEFAULT_ALPHA_PRIOR_MIN,
+    alpha_max=DEFAULT_ALPHA_PRIOR_MAX,
 ):
     return H0LogLikelihood(
-        dL_gw_samples, host_galaxies_z,
-        sigma_v, c_val, omega_m_val,
-        h0_min, h0_max,
-        use_vectorized_likelihood=True
+        dL_gw_samples,
+        host_galaxies_z,
+        host_galaxies_mass_proxy,
+        sigma_v,
+        c_val,
+        omega_m_val,
+        h0_min,
+        h0_max,
+        alpha_min,
+        alpha_max,
+        use_vectorized_likelihood=True,
     )
 
 def run_mcmc_h0(
-    log_likelihood_func, 
-    event_name, # For logging
-    n_walkers=DEFAULT_MCMC_N_WALKERS, 
-    n_dim=DEFAULT_MCMC_N_DIM, 
-    initial_h0_mean=DEFAULT_MCMC_INITIAL_H0_MEAN, 
-    initial_h0_std=DEFAULT_MCMC_INITIAL_H0_STD, 
+    log_likelihood_func,
+    event_name,  # For logging
+    n_walkers=DEFAULT_MCMC_N_WALKERS,
+    n_dim=DEFAULT_MCMC_N_DIM,
+    initial_h0_mean=DEFAULT_MCMC_INITIAL_H0_MEAN,
+    initial_h0_std=DEFAULT_MCMC_INITIAL_H0_STD,
+    alpha_prior_min=DEFAULT_ALPHA_PRIOR_MIN,
+    alpha_prior_max=DEFAULT_ALPHA_PRIOR_MAX,
     n_steps=DEFAULT_MCMC_N_STEPS,
-    pool=None  # Add new pool parameter
+    pool=None,
 ):
     """
     Runs the MCMC sampler for H0.
@@ -256,22 +335,23 @@ def run_mcmc_h0(
         log_likelihood_func (function): The log likelihood function `log_likelihood(theta)`.
         event_name (str): Name of the event for logging.
         n_walkers (int): Number of MCMC walkers.
-        n_dim (int): Number of dimensions (should be 1 for H0).
-        initial_h0_mean (float): Mean for initializing walker positions.
-        initial_h0_std (float): Standard deviation for initializing walker positions.
+        n_dim (int): Number of dimensions (2 for ``H0`` and ``alpha``).
+        initial_h0_mean (float): Mean for initializing ``H0`` walker positions.
+        initial_h0_std (float): Standard deviation for initializing ``H0`` positions.
+        alpha_prior_min (float): Lower bound for ``alpha`` initialization.
+        alpha_prior_max (float): Upper bound for ``alpha`` initialization.
         n_steps (int): Number of MCMC steps.
         pool (object, optional): A pool object for parallelization (e.g., from multiprocessing or emcee.interruptible_pool).
 
     Returns:
         emcee.EnsembleSampler: The MCMC sampler object after running, or None on failure.
     """
-    logger.info(f"Running MCMC for H0 on event {event_name} ({n_steps} steps, {n_walkers} walkers)...")
-    # Initial positions for walkers, centered around a plausible H0
-    walkers0 = initial_h0_mean + initial_h0_std * np.random.randn(n_walkers, n_dim)
-
-    # Ensure walkers0 is 2D: (n_walkers, n_dim)
-    if walkers0.ndim == 1:
-        walkers0 = walkers0[:, np.newaxis]
+    logger.info(
+        f"Running MCMC for H0 and alpha on event {event_name} ({n_steps} steps, {n_walkers} walkers)..."
+    )
+    pos_H0 = initial_h0_mean + initial_h0_std * np.random.randn(n_walkers, 1)
+    pos_alpha = np.random.uniform(alpha_prior_min, alpha_prior_max, size=(n_walkers, 1))
+    walkers0 = np.hstack((pos_H0, pos_alpha))
         
     sampler = emcee.EnsembleSampler(
         n_walkers, 

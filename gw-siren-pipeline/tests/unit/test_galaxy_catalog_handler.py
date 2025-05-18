@@ -23,10 +23,13 @@ def test_clean_numeric_conversion_and_coercion():
             "ra": ["10.5", "bad_val", 15.0, 20.0],
             "dec": ["20.5", 30, 45.0, 50],
             "z": ["0.05", 0.1, "bad", 0.02],
+            "mass_proxy": [1.0, "bad", 2.0, 3.0],
         }
     )
 
-    cleaned = clean_galaxy_catalog(df, numeric_cols=["PGC", "ra", "dec", "z"])
+    cleaned = clean_galaxy_catalog(
+        df, numeric_cols=["PGC", "ra", "dec", "z", "mass_proxy"], cols_to_dropna=["ra", "dec", "z", "mass_proxy"]
+    )
 
     expected = pd.DataFrame(
         {
@@ -34,6 +37,7 @@ def test_clean_numeric_conversion_and_coercion():
             "ra": [10.5, 20.0],
             "dec": [20.5, 50.0],
             "z": [0.05, 0.02],
+            "mass_proxy": [1.0, 3.0],
         }
     )
 
@@ -47,10 +51,11 @@ def test_clean_dropna_specific_columns():
             "ra": [10.0, np.nan, 20.0, 30.0, 50.0],
             "dec": [0.0, 5.0, np.nan, 10.0, 20.0],
             "z": [0.01, 0.02, 0.03, np.nan, 0.05],
+            "mass_proxy": [1, 2, 3, 4, 5],
         }
     )
 
-    cleaned = clean_galaxy_catalog(df, cols_to_dropna=["ra", "dec", "z"])
+    cleaned = clean_galaxy_catalog(df, cols_to_dropna=["ra", "dec", "z", "mass_proxy"])
 
     expected = pd.DataFrame(
         {
@@ -58,6 +63,7 @@ def test_clean_dropna_specific_columns():
             "ra": [10.0, 50.0],
             "dec": [0.0, 20.0],
             "z": [0.01, 0.05],
+            "mass_proxy": [1, 5],
         }
     )
 
