@@ -241,3 +241,63 @@ def test_apply_correction_empty_hosts_df():
     )
 
     assert result.empty
+
+def test_clean_mass_proxy_numeric_conversion_and_nan_coercion():
+    df = pd.DataFrame(
+        {
+            "PGC": range(1, 9),
+            "ra": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0],
+            "dec": [1.0] * 8,
+            "z": [0.1] * 8,
+            "mass_proxy": [
+                "10.5",
+                12.0,
+                "bad_value",
+                np.nan,
+                "",
+                " ",
+                "0.02",
+                1,
+            ],
+        }
+    )
+
+    cleaned = clean_galaxy_catalog(
+        df,
+        numeric_cols=["PGC", "ra", "dec", "z", "mass_proxy"],
+        cols_to_dropna=["ra", "dec", "z"],
+    )
+
+    assert pd.api.types.is_float_dtype(cleaned["mass_proxy"])
+    expected_values = np.array([10.5, 12.0, np.nan, np.nan, np.nan, np.nan, 0.02, 1.0])
+    assert np.allclose(cleaned["mass_proxy"].to_numpy(), expected_values, equal_nan=True)
+    assert len(cleaned) == 8
+
+def test_clean_drops_rows_with_nan_mass_proxy():
+    df = pd.DataFrame(
+        {
+            "PGC": [1, 2, 3, 4, 5, 6],
+            "ra": [10.0, 20.0, 30.0, np.nan, 50.0, 60.0],
+            "dec": [0.0, 5.0, 10.0, 15.0, 20.0, 25.0],
+            "z": [0.01, 0.02, 0.03, 0.04, 0.05, np.nan],
+            "mass_proxy": [1, "bad_val", np.nan, 4, "5", " "],
+        }
+    )
+
+    cleaned = clean_galaxy_catalog(
+        df,
+        numeric_cols=["PGC", "ra", "dec", "z", "mass_proxy"],
+        cols_to_dropna=["ra", "dec", "z", "mass_proxy"],
+    )
+
+    expected = pd.DataFrame(
+        {
+            "PGC": [1, 5],
+            "ra": [10.0, 50.0],
+            "dec": [0.0, 20.0],
+            "z": [0.01, 0.05],
+            "mass_proxy": [1.0, 5.0],
+        }
+    )
+
+    pd.testing.assert_frame_equal(cleaned.reset_index(drop=True), expected)
