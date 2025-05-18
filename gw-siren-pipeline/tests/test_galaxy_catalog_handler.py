@@ -2,7 +2,12 @@ import pandas as pd
 import numpy as np
 import pytest
 
-from galaxy_catalog_handler import clean_galaxy_catalog, apply_specific_galaxy_corrections, DEFAULT_GALAXY_CORRECTIONS, DEFAULT_RANGE_CHECKS
+from gwsiren.data.catalogs import (
+    clean_galaxy_catalog,
+    apply_specific_galaxy_corrections,
+    DEFAULT_GALAXY_CORRECTIONS,
+    DEFAULT_RANGE_CHECKS,
+)
 
 
 def test_clean_galaxy_catalog_basic():

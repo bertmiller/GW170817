@@ -4,10 +4,10 @@ from unittest.mock import MagicMock
 import sys
 import pytest
 
-import gw_data_fetcher
-import event_data_extractor
-import galaxy_catalog_handler
-import sky_analyzer
+import gwsiren.gw_data_fetcher as gw_data_fetcher
+import gwsiren.event_data_extractor as event_data_extractor
+import gwsiren.data.catalogs as galaxy_catalog_handler
+import gwsiren.sky_analyzer as sky_analyzer
 
 
 @pytest.fixture
@@ -30,7 +30,7 @@ def test_successful_data_pipeline_flow(prevent_main_import, mocker, mock_config)
         }
     }
     mocker.patch(
-        "gw_data_fetcher.fetch_candidate_data",
+        "gwsiren.gw_data_fetcher.fetch_candidate_data",
         return_value=(True, mock_gw_obj),
     )
 
@@ -45,17 +45,17 @@ def test_successful_data_pipeline_flow(prevent_main_import, mocker, mock_config)
     )
     mock_clean_df = mock_raw_df.copy()
     mocker.patch(
-        "galaxy_catalog_handler.download_and_load_galaxy_catalog",
+        "gwsiren.data.catalogs.download_and_load_galaxy_catalog",
         return_value=mock_raw_df,
     )
     mocker.patch(
-        "galaxy_catalog_handler.clean_galaxy_catalog",
+        "gwsiren.data.catalogs.clean_galaxy_catalog",
         return_value=mock_clean_df,
     )
 
     # Control z max estimation
     mocker.patch(
-        "sky_analyzer.estimate_event_specific_z_max",
+        "gwsiren.sky_analyzer.estimate_event_specific_z_max",
         return_value=0.05,
     )
 
@@ -94,11 +94,11 @@ def test_pipeline_handles_failure_in_extraction(prevent_main_import, mocker, moc
     mock_gw_obj = MagicMock()
     mock_gw_obj.samples_dict = {}
     mocker.patch(
-        "gw_data_fetcher.fetch_candidate_data",
+        "gwsiren.gw_data_fetcher.fetch_candidate_data",
         return_value=(True, mock_gw_obj),
     )
     mocker.patch(
-        "event_data_extractor.extract_gw_event_parameters",
+        "gwsiren.event_data_extractor.extract_gw_event_parameters",
         return_value=(None, None, None),
     )
     mock_raw_df = pd.DataFrame(
@@ -110,21 +110,21 @@ def test_pipeline_handles_failure_in_extraction(prevent_main_import, mocker, moc
         }
     )
     mocker.patch(
-        "galaxy_catalog_handler.download_and_load_galaxy_catalog",
+        "gwsiren.data.catalogs.download_and_load_galaxy_catalog",
         return_value=mock_raw_df,
     )
     mocker.patch(
-        "galaxy_catalog_handler.clean_galaxy_catalog",
+        "gwsiren.data.catalogs.clean_galaxy_catalog",
         return_value=mock_raw_df,
     )
     mocker.patch(
-        "sky_analyzer.estimate_event_specific_z_max",
+        "gwsiren.sky_analyzer.estimate_event_specific_z_max",
         return_value=0.05,
     )
     npix = sky_analyzer.hp.nside2npix(16)
     empty_mask = np.zeros(npix, dtype=bool)
     mocker.patch(
-        "sky_analyzer.generate_sky_map_and_credible_region",
+        "gwsiren.sky_analyzer.generate_sky_map_and_credible_region",
         return_value=(np.zeros(npix), empty_mask, 0.0),
     )
 

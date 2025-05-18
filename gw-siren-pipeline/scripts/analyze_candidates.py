@@ -20,12 +20,12 @@ import pandas as pd
 try:
     from gw_data_fetcher import fetch_candidate_data, configure_astropy_cache, DEFAULT_CACHE_DIR_NAME
     from event_data_extractor import extract_gw_event_parameters
-    from galaxy_catalog_handler import (
+    from gwsiren.data.catalogs import (
         download_and_load_galaxy_catalog,
         clean_galaxy_catalog,
         apply_specific_galaxy_corrections,
-        DEFAULT_GALAXY_CORRECTIONS, # Used as VIZ_GALAXY_CORRECTIONS
-        DEFAULT_RANGE_CHECKS
+        DEFAULT_GALAXY_CORRECTIONS,  # Used as VIZ_GALAXY_CORRECTIONS
+        DEFAULT_RANGE_CHECKS,
     )
     from sky_analyzer import (
         generate_sky_map_and_credible_region,
@@ -35,9 +35,11 @@ try:
     )
 except ImportError as e:
     print(f"Error importing project modules: {e}")
-    print("Please ensure that gw_data_fetcher.py, event_data_extractor.py, "
-          "galaxy_catalog_handler.py, and sky_analyzer.py are accessible "
-          "in your Python path or the same directory.")
+    print(
+        "Please ensure that gw_data_fetcher.py, event_data_extractor.py, "
+        "gwsiren.data.catalogs, and sky_analyzer.py are accessible "
+        "in your Python path or the same directory."
+    )
     sys.exit(1)
 
 # Configure basic logging
@@ -60,7 +62,7 @@ VIZ_CATALOG_TYPE = 'glade+'
 VIZ_NSIDE_SKYMAP = CONFIG.skymap["default_nside"]
 VIZ_PROB_THRESHOLD_CDF = CONFIG.skymap["credible_level"]
 VIZ_HOST_Z_MAX_FALLBACK = 0.05
-VIZ_GALAXY_CORRECTIONS = DEFAULT_GALAXY_CORRECTIONS # Use defaults from galaxy_catalog_handler
+VIZ_GALAXY_CORRECTIONS = DEFAULT_GALAXY_CORRECTIONS  # Use defaults from gwsiren.data.catalogs
 
 
 def analyze_candidates():

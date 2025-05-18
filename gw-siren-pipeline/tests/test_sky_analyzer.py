@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from sky_analyzer import (
+from gwsiren.sky_analyzer import (
     generate_sky_map_and_credible_region,
     select_galaxies_in_sky_region,
     filter_galaxies_by_redshift,

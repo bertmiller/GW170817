@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from unittest.mock import MagicMock
 
-from event_data_extractor import extract_gw_event_parameters
+from gwsiren.event_data_extractor import extract_gw_event_parameters
 
 
 def test_extract_from_ideal_pesummary_object():

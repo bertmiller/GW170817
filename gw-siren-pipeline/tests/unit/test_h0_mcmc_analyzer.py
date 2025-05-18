@@ -3,7 +3,7 @@ import numpy as np
 from astropy.cosmology import FlatLambdaCDM
 from astropy import units as u
 
-from h0_mcmc_analyzer import (
+from gwsiren.h0_mcmc_analyzer import (
     H0LogLikelihood,
     get_log_likelihood_h0,
     DEFAULT_SIGMA_V_PEC,

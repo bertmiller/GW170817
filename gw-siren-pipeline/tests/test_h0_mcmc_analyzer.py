@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from h0_mcmc_analyzer import (
+from gwsiren.h0_mcmc_analyzer import (
     get_log_likelihood_h0,
     DEFAULT_H0_PRIOR_MIN,
     DEFAULT_H0_PRIOR_MAX
