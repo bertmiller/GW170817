@@ -17,25 +17,29 @@ The goal of this project is to create scalable pipelines for analyzing GW events
 
 ## 2. Codebase Structure
 
-- **`gwsiren/`**: Core package containing reusable modules.
-  - `config.py`: Handles loading project-wide configurations from `config.yaml`.
+- **`gwsiren/`**: Core package containing all reusable modules.
   - `__init__.py`: Package initializer.
+  - `config.py`: Handles loading project-wide configurations from `config.yaml`.
+  - `gw_data_fetcher.py`: Fetches GW event data.
+  - `event_data_extractor.py`: Extracts data from GW event objects.
+  - `sky_analyzer.py`: Handles sky localization and galaxy selection logic.
+  - `h0_mcmc_analyzer.py`: Implements H0 likelihood and MCMC logic.
+  - `plot_utils.py`: Utility functions for plotting.
+  - `data/`: Subpackage for data handling.
+    - `catalogs.py`: Manages galaxy catalog operations.
+    - `__init__.py`: Subpackage initializer.
+
+- **`scripts/`**: Contains executable scripts for analysis.
+  - `h0_e2e_pipeline.py`: Main end-to-end pipeline for H0 analysis.
+  - `viz.py`: Comprehensive visualization script.
+  - `analyze_candidates.py`: Script for analyzing multiple GW candidates (no MCMC).
+
 - **`tests/`**: Contains all tests for the project.
   - `unit/`: Unit tests for individual modules and functions.
   - `integration/`: Tests for interactions between modules.
   - `e2e/`: End-to-end tests for main analysis scripts.
   - `conftest.py`: Common `pytest` fixtures.
-- **Root Directory Scripts**:
-  - `main.py`: (Legacy) Monolithic script for GW170817 analysis. Prefer using/enhancing `new.py`.
-  - `new.py`: Main refactored script for H0 analysis, utilizing modular components.
-  - `viz.py`: Comprehensive visualization script.
-  - `analyze_candidates.py`: Script for analyzing multiple GW candidates (no MCMC).
-  - `galaxy_catalog_handler.py`: Manages galaxy catalog operations.
-  - `sky_analyzer.py`: Handles sky localization and galaxy selection logic.
-  - `event_data_extractor.py`: Extracts data from GW event objects.
-  - `h0_mcmc_analyzer.py`: Implements H0 likelihood and MCMC logic.
-  - `gw_data_fetcher.py`: Fetches GW event data.
-  - `plot_utils.py`: Utility functions for plotting.
+
 - **`config.yaml`**: (In project root) Central configuration file for URLs, paths, and parameters. **Always prefer using values from this config over hardcoding.**
 
 ## 3. Configuration Management
@@ -68,10 +72,10 @@ The goal of this project is to create scalable pipelines for analyzing GW events
     ```
 - **Imports**:
   - Group imports: standard library, then third-party, then local application/library specific.
-  - Use absolute imports where possible for clarity within the project.
+  - Use absolute imports from the `gwsiren` package (e.g., `from gwsiren.sky_analyzer import ...`).
 - **Modularity**:
   - Strive for small, focused functions and classes.
-  - Utilize existing functions from modules like `galaxy_catalog_handler.py`, `sky_analyzer.py`, etc., instead of re-implementing logic.
+  - Utilize existing functions from modules like `gwsiren.data.catalogs`, `gwsiren.sky_analyzer`, etc., instead of re-implementing logic.
   - If adding substantial new, reusable functionality, consider placing it in an appropriate existing module or discuss creating a new one.
 
 ## 5. Logging
@@ -84,7 +88,7 @@ The goal of this project is to create scalable pipelines for analyzing GW events
   - `logger.warning()`: For potential issues or unexpected situations that don't prevent execution.
   - `logger.error()`: For errors that prevent a specific operation from completing.
   - `logger.critical()`: For severe errors that might terminate the application.
-- Provide informative log messages. Configuration for log levels and handlers is typically done in main script entry points (like `viz.py` or `if __name__ == "__main__":` blocks).
+- Provide informative log messages. Configuration for log levels and handlers is typically done in main script entry points (like `scripts/viz.py` or `if __name__ == "__main__":` blocks).
 
 ## 6. Error Handling
 
@@ -114,7 +118,7 @@ The goal of this project is to create scalable pipelines for analyzing GW events
 
 ## 8. Key External Dependencies
 
-- **`pesummary`**: For fetching GW posterior samples. Data is cached (see `gw_data_fetcher.py` and `DEFAULT_CACHE_DIR_NAME`).
+- **`pesummary`**: For fetching GW posterior samples. Data is cached (see `gwsiren.gw_data_fetcher` and `DEFAULT_CACHE_DIR_NAME`).
 - **`healpy`**: For HEALPix sky map operations.
 - **`emcee`**: For MCMC sampling.
 - **`astropy`**: For cosmological calculations and coordinates.
@@ -124,7 +128,7 @@ The goal of this project is to create scalable pipelines for analyzing GW events
 
 ## 9. Data Handling Conventions
 
-- **Galaxy Catalogs**: Expect columns like 'PGC', 'ra', 'dec', 'z'. See `galaxy_catalog_handler.py` for details on column names and types after cleaning.
+- **Galaxy Catalogs**: Expect columns like 'PGC', 'ra', 'dec', 'z'. See `gwsiren.data.catalogs` for details on column names and types after cleaning.
 - **Sky Coordinates**:
   - Posterior samples (e.g., from `pesummary`) often have RA/Dec in radians. Convert to degrees for sky map generation (`healpy.ang2pix` often expects degrees if `lonlat=True`).
   - Galaxy catalog coordinates are typically in degrees.
@@ -146,7 +150,7 @@ The goal of this project is to create scalable pipelines for analyzing GW events
 ## 11. Specific Instructions for AI Agent Tasks
 
 - **Code Generation**:
-  - When adding new functionality, prioritize adding it to existing relevant modules.
+  - When adding new functionality, prioritize adding it to existing relevant modules in the `gwsiren` package.
   - Ensure new public functions/classes have type hints and comprehensive docstrings.
   - Use the `gwsiren.CONFIG` object for any configurable parameters.
 - **Test Generation**:
@@ -169,4 +173,4 @@ The goal of this project is to create scalable pipelines for analyzing GW events
 - **Large Files in Repo**: Do not commit large data files directly to the repository. Data should be downloaded by scripts (e.g., galaxy catalogs, GW samples).
 - **Breaking Tests**: Do not submit changes that cause existing tests to fail, unless the test itself needs to be updated due to an intentional change in functionality.
 
-Thank you for helping improve this project!****
+Thank you for helping improve this project!
