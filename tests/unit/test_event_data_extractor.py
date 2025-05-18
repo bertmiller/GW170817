@@ -71,7 +71,7 @@ def test_extract_from_dict_of_dicts_fallback_if_no_preferred(caplog):
     assert np.allclose(dL, [400.0])
     assert np.allclose(ra, np.rad2deg([0.5]))
     assert np.allclose(dec, np.rad2deg([-0.5]))
-    assert "Using first one (fallback): 'analysis1'" in "".join(caplog.messages)
+    assert "Multiple analyses found in samples_dict for MOCK_EVENT. Using: 'analysis1'" in "".join(caplog.messages)
 
 
 @pytest.mark.parametrize("missing_key", ["luminosity_distance", "ra", "dec"])
