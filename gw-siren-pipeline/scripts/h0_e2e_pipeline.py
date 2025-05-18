@@ -21,12 +21,12 @@ import pandas as pd
 from emcee.interruptible_pool import InterruptiblePool
 from gwsiren import CONFIG
 
-from gw_data_fetcher import (
+from gwsiren.gw_data_fetcher import (
     configure_astropy_cache,
     fetch_candidate_data,
     DEFAULT_CACHE_DIR_NAME,
 )
-from event_data_extractor import extract_gw_event_parameters
+from gwsiren.event_data_extractor import extract_gw_event_parameters
 from gwsiren.data.catalogs import (
     download_and_load_galaxy_catalog,
     clean_galaxy_catalog,
@@ -34,13 +34,13 @@ from gwsiren.data.catalogs import (
     DEFAULT_GALAXY_CORRECTIONS,
     DEFAULT_RANGE_CHECKS,
 )
-from sky_analyzer import (
+from gwsiren.sky_analyzer import (
     generate_sky_map_and_credible_region,
     select_galaxies_in_sky_region,
     filter_galaxies_by_redshift,
     estimate_event_specific_z_max,
 )
-from h0_mcmc_analyzer import (
+from gwsiren.h0_mcmc_analyzer import (
     get_log_likelihood_h0,
     run_mcmc_h0,
     process_mcmc_samples,
