@@ -92,9 +92,28 @@ class H0LogLikelihood:
         self.alpha_min = alpha_min
         self.alpha_max = alpha_max
 
+        # Pre-create a base cosmology object to avoid repeated construction
+        # during likelihood evaluations. Using ``H0=1`` allows scaling
+        # distances for arbitrary ``H0`` values without recomputing the
+        # cosmology internals.
+        self._base_cosmo = FlatLambdaCDM(
+            H0=1.0 * u.km / u.s / u.Mpc, Om0=self.omega_m_val
+        )
+
     def _lum_dist_model(self, z, H0_val):
-        cosmo = FlatLambdaCDM(H0=H0_val * u.km / u.s / u.Mpc, Om0=self.omega_m_val)
-        return cosmo.luminosity_distance(z).value
+        """Compute luminosity distance for ``z`` and ``H0_val``.
+
+        This method reuses a pre-created cosmology instance for efficiency.
+
+        Args:
+            z: Redshift value(s).
+            H0_val: Hubble constant value.
+
+        Returns:
+            Luminosity distance in Mpc units.
+        """
+        base_distance = self._base_cosmo.luminosity_distance(z).value
+        return base_distance / H0_val
 
     def __call__(self, theta):
         H0 = theta[0]
