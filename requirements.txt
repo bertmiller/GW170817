@@ -8,3 +8,4 @@ emcee
 pesummary
 pyyaml
 pytest
+pytest-mock
