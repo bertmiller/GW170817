@@ -19,22 +19,28 @@ except ImportError:
     # for the importing script to catch, or exit here.
     sys.exit("❌ Install dependencies first: pip install pesummary healpy emcee astropy pandas matplotlib scipy")
 
-# Remove the hardcoded defaults and use config values
-DEFAULT_CACHE_DIR_NAME = "pesummary_cache"
-DEFAULT_TIMEOUT = 30
-MAX_RETRIES = 3
+# Default values now sourced from configuration. Values are retrieved lazily so
+# tests can patch :data:`gwsiren.config.CONFIG` after import.
 
-def configure_astropy_cache(cache_dir_base=DEFAULT_CACHE_DIR_NAME):
-    """
-    Configures Astropy's cache settings and creates the directory if it doesn't exist.
+def configure_astropy_cache(cache_dir_base: str | None = None) -> str | None:
+    """Configure the Astropy cache directory.
+
+    By default the directory name is taken from :data:`CONFIG.fetcher`, allowing
+    users to override it in ``config.yaml``.
 
     Args:
-        cache_dir_base (str): The base name or path for the cache directory.
+        cache_dir_base: The base name or path for the cache directory. If
+            ``None``, the value from :data:`CONFIG.fetcher` is used. If relative,
+            it is resolved against the current working directory.
                               If relative, it's relative to the current working directory.
 
     Returns:
-        str: The absolute path to the configured cache directory, or None if configuration failed.
+        The absolute path to the configured cache directory, or ``None`` if
+        configuration failed.
     """
+    if cache_dir_base is None:
+        cache_dir_base = CONFIG.fetcher["cache_dir_name"]
+
     abs_cache_dir = os.path.abspath(cache_dir_base)
     if not os.path.exists(abs_cache_dir):
         try:
@@ -56,27 +62,37 @@ def configure_astropy_cache(cache_dir_base=DEFAULT_CACHE_DIR_NAME):
         astropy_conf.remote_data_strict = False
     return abs_cache_dir
 
-def fetch_candidate_data(candidate_name, configured_cache_dir, timeout=DEFAULT_TIMEOUT, max_retries=MAX_RETRIES):
-    """
-    Fetches posterior samples for a given gravitational wave candidate.
+def fetch_candidate_data(
+    candidate_name: str,
+    configured_cache_dir: str,
+    timeout: int | None = None,
+    max_retries: int | None = None,
+) -> tuple[bool, object | str]:
+    """Fetch posterior samples for a gravitational-wave candidate.
 
     Handles caching and common errors like multiple posterior tables or unknown URLs.
     It's expected that configure_astropy_cache() has been called appropriately before this.
 
     Args:
-        candidate_name (str): The name of the GW candidate (e.g., "GW170817").
-        configured_cache_dir (str): The absolute path to the directory pesummary should use for 'outdir',
-                                    which Astropy is also configured to use as its cache_dir.
-        timeout (int): Timeout in seconds for network requests.
-        max_retries (int): Maximum number of retries for failed requests.
+        candidate_name: The name of the GW candidate (e.g. ``"GW170817"``).
+        configured_cache_dir: Absolute path to the directory pesummary should
+            use for ``outdir`` and that Astropy will use as ``cache_dir``.
+        timeout: Timeout in seconds for network requests. If ``None``, the value
+            from :data:`CONFIG.fetcher` is used.
+        max_retries: Maximum number of retries for failed requests. If ``None``,
+            the value from :data:`CONFIG.fetcher` is used.
 
     Returns:
-        tuple: (success_flag, data_or_error_message)
-               - If successful: (True, pesummary_object)
-               - If failed: (False, error_message_string)
+        Tuple ``(success, data_or_message)`` where ``success`` indicates whether
+        fetching succeeded. ``data_or_message`` is either the pesummary object on
+        success or an error message string on failure.
     """
     logger.info(f"Attempting to fetch {candidate_name} posterior (using astropy cache: {configured_cache_dir}) …")
-    
+    if timeout is None:
+        timeout = CONFIG.fetcher["timeout"]
+    if max_retries is None:
+        max_retries = CONFIG.fetcher["max_retries"]
+
     # Using the download_kwargs structure as per your last working version
     common_download_kwargs = {
         'cache': True,
@@ -163,9 +179,8 @@ if __name__ == "__main__":
     )
     logger.info("--- Testing gw_data_fetcher module ---")
     
-    # Configure cache for the test
-    # Uses the DEFAULT_CACHE_DIR_NAME defined in this module
-    test_cache_dir = configure_astropy_cache() 
+    # Configure cache for the test using the configured default directory
+    test_cache_dir = configure_astropy_cache()
 
     if not test_cache_dir:
         logger.critical("CRITICAL: Failed to configure cache directory for module test. Exiting.")

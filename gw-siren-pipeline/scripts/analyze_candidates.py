@@ -18,7 +18,7 @@ import pandas as pd
 # Assuming the script is in the same directory as viz.py and its helper modules,
 # or that these modules are in the Python path.
 try:
-    from gw_data_fetcher import fetch_candidate_data, configure_astropy_cache, DEFAULT_CACHE_DIR_NAME
+    from gw_data_fetcher import fetch_candidate_data, configure_astropy_cache
     from event_data_extractor import extract_gw_event_parameters
     from gwsiren.data.catalogs import (
         download_and_load_galaxy_catalog,
@@ -72,7 +72,7 @@ def analyze_candidates():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     logger.info(f"Ensuring output directory exists: {os.path.abspath(OUTPUT_DIR)}")
 
-    effective_cache_dir = configure_astropy_cache(DEFAULT_CACHE_DIR_NAME)
+    effective_cache_dir = configure_astropy_cache(CONFIG.fetcher["cache_dir_name"])
     if not effective_cache_dir:
         logger.critical("❌ CRITICAL: Failed to configure cache. Exiting.")
         sys.exit(1)
