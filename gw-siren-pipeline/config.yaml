@@ -33,9 +33,9 @@ multi_event_analysis:
     run_label: "demo_run"
     base_output_directory: "output/multi_event_runs/"
     candidate_galaxy_cache_dir: "cache/candidate_galaxies/"
+    gw_posteriors_cache_dir: "cache/gw_posteriors/"
   events_to_combine:
     - event_id: "GW170817"
-      # gw_dl_samples_path: "precomputed/GW170817/dL_samples.npy"
     - event_id: "GW190814"
   priors:
     H0: { min: 10.0, max: 200.0 }
