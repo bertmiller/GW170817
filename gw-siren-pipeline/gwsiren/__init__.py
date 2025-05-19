@@ -23,6 +23,7 @@ from .multi_event_data_manager import (
 )
 from .combined_likelihood import CombinedLogLikelihood
 from .backends import log_gaussian
+from .backends import get_xp
 
 __all__ = [
     "Config",
@@ -46,4 +47,5 @@ __all__ = [
     "run_global_mcmc",
     "process_global_mcmc_samples",
     "save_global_samples",
+    "get_xp",
 ]
