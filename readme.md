@@ -49,15 +49,6 @@ it defines which events to process, global priors on `H0` and `alpha`, optional
 MCMC overrides, and cosmology parameters. A minimal example is provided at the
 end of `config.yaml`.
 
-To execute a multi-event run, call the orchestrator script:
-
-```bash
-python gw-siren-pipeline/scripts/run_multi_event_pipeline.py
-```
-
-An example wrapper is provided in `examples/run_multi_event_example.py` which
-assumes the configuration above and simply invokes the orchestrator function.
-
 ## Running Tests
 
 Project tests are written with `pytest`. Execute them from the repository root:
