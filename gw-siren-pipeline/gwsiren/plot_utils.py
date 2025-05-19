@@ -1,12 +1,16 @@
 import numpy as np
-import pandas as pd # Used for type hinting candidate_hosts_df
+import pandas as pd  # Used for type hinting candidate_hosts_df
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D # Required for projection='3d', do not remove
+from mpl_toolkits.mplot3d import Axes3D  # Required for projection='3d'
 from astropy.cosmology import FlatLambdaCDM
 from astropy import units as u
 import logging
-import os # Added os module
-from matplotlib.animation import FuncAnimation # Added for GIF animation
+import os
+from matplotlib.animation import FuncAnimation
+from typing import Dict, List, Optional
+
+from scipy.stats import gaussian_kde
+import corner
 
 logger = logging.getLogger(__name__)
 
@@ -327,3 +331,157 @@ def create_mean_log_prob_animation_gif(
         logger.error("  Ensure 'Pillow' is installed (pip install Pillow).")
     finally:
         plt.close(fig)
+
+
+def load_combined_samples(combined_samples_filepath: str) -> np.ndarray:
+    """Load combined multi-event posterior samples.
+
+    Args:
+        combined_samples_filepath: Path to the ``.npy`` file containing the
+            combined samples array of shape ``(N, 2)``.
+
+    Returns:
+        Array of samples with shape ``(N, 2)``.
+
+    Raises:
+        FileNotFoundError: If the file does not exist.
+    """
+
+    if not os.path.exists(combined_samples_filepath):
+        raise FileNotFoundError(f"Combined samples file not found: {combined_samples_filepath}")
+
+    return np.load(combined_samples_filepath)
+
+
+def load_individual_event_samples(
+    event_id: str, single_event_output_dir: str = "output"
+) -> Optional[np.ndarray]:
+    """Load posterior samples for a single event.
+
+    Args:
+        event_id: Identifier of the GW event.
+        single_event_output_dir: Directory containing ``H0_samples_<event>.npy``.
+
+    Returns:
+        Array of samples if the file exists, otherwise ``None``.
+    """
+
+    path = os.path.join(single_event_output_dir, f"H0_samples_{event_id}.npy")
+    if not os.path.exists(path):
+        return None
+    return np.load(path)
+
+
+def get_event_ids_from_config(me_config: "MultiEventAnalysisSettings") -> List[str]:
+    """Extract the list of event IDs from ``MultiEventAnalysisSettings``.
+
+    Args:
+        me_config: Loaded multi-event configuration object.
+
+    Returns:
+        List of event identifiers present in the configuration.
+    """
+
+    return [entry.event_id for entry in me_config.events_to_combine]
+
+
+def plot_overlaid_1d_posteriors(
+    param_samples_dict: Dict[str, np.ndarray],
+    combined_samples: np.ndarray,
+    param_name: str,
+    output_filepath: str,
+    param_index: int = 0,
+    legend_loc: str = "best",
+    colors: Optional[List[str]] = None,
+    combined_color: str = "black",
+    show_ci: bool = True,
+) -> None:
+    """Plot overlaid 1D posterior densities for multiple events and the combined result.
+
+    Args:
+        param_samples_dict: Mapping of event ID to 1D samples of the parameter.
+        combined_samples: Array of combined samples with shape ``(N, 2)``.
+        param_name: Label for the x-axis.
+        output_filepath: Where to save the generated plot.
+        param_index: Column index within ``combined_samples`` to plot.
+        legend_loc: Legend location string for ``matplotlib``.
+        colors: Optional list of colors for individual events.
+        combined_color: Color for the combined posterior line.
+        show_ci: Whether to annotate median and 68% credible interval.
+    """
+
+    plt.figure(figsize=(8, 5))
+    x_vals = []
+    for arr in param_samples_dict.values():
+        x_vals.append(arr)
+    x_vals.append(combined_samples[:, param_index])
+    xmin = min(arr.min() for arr in x_vals)
+    xmax = max(arr.max() for arr in x_vals)
+    grid = np.linspace(xmin, xmax, 1000)
+
+    if colors is None:
+        colors = plt.rcParams["axes.prop_cycle"].by_key().get("color", [])
+
+    for idx, (event, samples) in enumerate(param_samples_dict.items()):
+        color = colors[idx % len(colors)] if colors else None
+        kde = gaussian_kde(samples)
+        plt.plot(grid, kde(grid), label=event, color=color)
+        if show_ci:
+            q16, q50, q84 = np.percentile(samples, [16, 50, 84])
+            plt.axvline(q50, color=color, linestyle="--", alpha=0.7)
+            plt.fill_betweenx([0, kde(grid).max()], q16, q84, color=color, alpha=0.2)
+
+    comb_samples = combined_samples[:, param_index]
+    comb_kde = gaussian_kde(comb_samples)
+    plt.plot(grid, comb_kde(grid), label="Combined", color=combined_color, linewidth=2)
+    if show_ci:
+        q16, q50, q84 = np.percentile(comb_samples, [16, 50, 84])
+        plt.axvline(q50, color=combined_color, linestyle="-.")
+        plt.fill_betweenx([0, comb_kde(grid).max()], q16, q84, color=combined_color, alpha=0.3)
+
+    plt.xlabel(param_name)
+    plt.ylabel("Probability Density")
+    plt.legend(loc=legend_loc)
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(output_filepath), exist_ok=True)
+    plt.savefig(output_filepath)
+    plt.close()
+
+
+def plot_combined_corner(
+    samples: np.ndarray,
+    output_filepath: str,
+    labels: List[str] | None = None,
+    show_titles: bool = True,
+    quantiles: Optional[List[float]] = None,
+) -> None:
+    """Create a corner plot from the combined ``H0`` and ``alpha`` samples.
+
+    Args:
+        samples: Array of shape ``(N, 2)`` with ``H0`` and ``alpha`` samples.
+        output_filepath: Path to save the generated corner plot.
+        labels: Optional list of axis labels. Defaults to ``["$H_0$", "$\\alpha$"]``.
+        show_titles: Whether to show axis titles with quantiles.
+        quantiles: Optional list of quantiles to annotate on the 1D histograms.
+    """
+
+    if labels is None:
+        labels = ["$H_0$", "$\\alpha$"]
+    if quantiles is None:
+        quantiles = [0.16, 0.5, 0.84]
+
+    fig = corner.corner(samples, labels=labels, show_titles=show_titles, quantiles=quantiles)
+    os.makedirs(os.path.dirname(output_filepath), exist_ok=True)
+    fig.savefig(output_filepath)
+    plt.close(fig)
+
+
+__all__ = [
+    "plot_3d_localization_with_galaxies",
+    "create_mean_log_prob_animation_gif",
+    "load_combined_samples",
+    "load_individual_event_samples",
+    "get_event_ids_from_config",
+    "plot_overlaid_1d_posteriors",
+    "plot_combined_corner",
+]

@@ -60,6 +60,20 @@ python gw-siren-pipeline/scripts/run_multi_event_pipeline.py
 An example wrapper is provided in `examples/run_multi_event_example.py` which
 assumes the configuration above and simply invokes the orchestrator function.
 
+### Visualizing Results
+
+After a multi-event run completes you can generate summary plots using
+`examples/visualize_multi_event_results.py`:
+
+```bash
+python examples/visualize_multi_event_results.py \
+    --combined-samples output/multi_event_runs/<RUN_LABEL>/global_samples.npy
+```
+
+This script overlays the posterior distributions for each event with the
+combined constraint and produces a corner plot of the joint $H_0$–$\alpha$
+posterior. See `VISUALIZATION.md` for details.
+
 ## Running Tests
 
 Project tests are written with `pytest`. Execute them from the repository root:
