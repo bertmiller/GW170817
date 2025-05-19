@@ -11,6 +11,7 @@ import cProfile
 import pstats
 import io
 from gwsiren import CONFIG
+from gwsiren.backends import log_gaussian
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,107 @@ DEFAULT_ALPHA_PRIOR_MIN = CONFIG.mcmc.get("prior_alpha_min", -1.0)
 DEFAULT_ALPHA_PRIOR_MAX = CONFIG.mcmc.get("prior_alpha_max", 1.0)
 DEFAULT_MCMC_INITIAL_ALPHA_MEAN = 0.0
 DEFAULT_MCMC_INITIAL_ALPHA_STD = 0.5
+
+
+def _calculate_vectorized_log_likelihood_core(
+    theta: tuple[float, float],
+    dL_gw_samples: object,
+    mass_proxy_values: object,
+    base_dl_for_hosts: object,
+    *,
+    sigma_v_pec: float,
+    c_light: float,
+    h0_min: float,
+    h0_max: float,
+    alpha_min: float,
+    alpha_max: float,
+    xp: object,
+    log_gaussian_func: callable,
+    num_gw_samples: int,
+) -> float:
+    """Core vectorized likelihood calculation.
+
+    This function performs the heavy numerical work of the likelihood using the
+    provided backend ``xp``. It contains no side effects and is therefore
+    suitable for JIT compilation with JAX.
+
+    Args:
+        theta: Tuple of ``(H0, alpha)`` parameters.
+        dL_gw_samples: Array of GW luminosity distance samples.
+        mass_proxy_values: Mass proxy values for the host galaxies.
+        base_dl_for_hosts: Precomputed luminosity distance at ``H0=1`` for each
+            host galaxy redshift.
+        sigma_v_pec: Peculiar velocity dispersion in km/s.
+        c_light: Speed of light in km/s.
+        h0_min: Minimum allowed value of ``H0``.
+        h0_max: Maximum allowed value of ``H0``.
+        alpha_min: Minimum allowed value of ``alpha``.
+        alpha_max: Maximum allowed value of ``alpha``.
+        xp: Numerical backend module (``numpy`` or ``jax.numpy``).
+        log_gaussian_func: Callable implementing the log Gaussian PDF.
+        num_gw_samples: Number of GW samples.
+
+    Returns:
+        The log-likelihood value. ``-xp.inf`` if parameters are outside the
+        allowed range or numerical issues occur.
+    """
+
+    H0, alpha = theta
+
+    if not (h0_min <= H0 <= h0_max):
+        return -xp.inf
+    if not (alpha_min <= alpha <= alpha_max):
+        return -xp.inf
+
+    dL_gw_samples = xp.asarray(dL_gw_samples)
+    mass_proxy_values = xp.asarray(mass_proxy_values)
+    base_dl_for_hosts = xp.asarray(base_dl_for_hosts)
+
+    model_d_for_hosts = base_dl_for_hosts / H0
+    if xp.any(~xp.isfinite(model_d_for_hosts)):
+        return -xp.inf
+
+    sigma_d_val_for_hosts = (model_d_for_hosts / c_light) * sigma_v_pec
+    sigma_d_val_for_hosts = xp.maximum(sigma_d_val_for_hosts, 1e-9)
+    if xp.any(~xp.isfinite(sigma_d_val_for_hosts)):
+        return -xp.inf
+
+    log_pdf_values_full = log_gaussian_func(
+        xp,
+        dL_gw_samples[:, xp.newaxis],
+        model_d_for_hosts[xp.newaxis, :],
+        sigma_d_val_for_hosts[xp.newaxis, :],
+    )
+    log_pdf_values_full = xp.nan_to_num(log_pdf_values_full, nan=-xp.inf)
+
+    log_sum_over_gw_samples = (
+        xp.logaddexp.reduce(log_pdf_values_full, axis=0)
+        - xp.log(num_gw_samples)
+    )
+
+    if xp.isclose(alpha, 0.0):
+        weights = xp.full(mass_proxy_values.shape[0], 1.0 / mass_proxy_values.shape[0])
+    else:
+        powered = mass_proxy_values ** alpha
+        if xp.any(powered <= 0) or xp.any(~xp.isfinite(powered)):
+            return -xp.inf
+        denom = powered.sum()
+        if denom <= 0 or ~xp.isfinite(denom):
+            return -xp.inf
+        weights = powered / denom
+
+    valid_mask = (weights > 0) & xp.isfinite(log_sum_over_gw_samples)
+    if xp.sum(valid_mask) == 0:
+        return -xp.inf
+
+    total_log_likelihood = xp.logaddexp.reduce(
+        xp.log(weights[valid_mask]) + log_sum_over_gw_samples[valid_mask]
+    )
+
+    if not xp.isfinite(total_log_likelihood):
+        return -xp.inf
+
+    return total_log_likelihood
 
 class H0LogLikelihood:
     """Log-likelihood for joint inference of ``H0`` and ``alpha``.
@@ -66,6 +168,9 @@ class H0LogLikelihood:
         alpha_min=DEFAULT_ALPHA_PRIOR_MIN,
         alpha_max=DEFAULT_ALPHA_PRIOR_MAX,
         use_vectorized_likelihood=False,
+        *,
+        xp=np,
+        backend_name="numpy",
     ):
         
         if dL_gw_samples is None or len(dL_gw_samples) == 0:
@@ -102,6 +207,9 @@ class H0LogLikelihood:
         self.alpha_min = alpha_min
         self.alpha_max = alpha_max
 
+        self.xp = xp
+        self.backend_name = backend_name
+
         # Pre-create a base cosmology object to avoid repeated construction
         # during likelihood evaluations. Using ``H0=1`` allows scaling
         # distances for arbitrary ``H0`` values without recomputing the
@@ -109,6 +217,29 @@ class H0LogLikelihood:
         self._base_cosmo = FlatLambdaCDM(
             H0=1.0 * u.km / u.s / u.Mpc, Om0=self.omega_m_val
         )
+        self._base_dl_for_hosts = self._base_cosmo.luminosity_distance(self.z_values).value
+
+        self._log_gaussian_func = log_gaussian
+        self._num_gw_samples = len(self.dL_gw_samples)
+
+        if self.backend_name == "jax" and hasattr(self.xp, "jit"):
+            static_arg_names = (
+                "sigma_v_pec",
+                "c_light",
+                "h0_min",
+                "h0_max",
+                "alpha_min",
+                "alpha_max",
+                "xp",
+                "log_gaussian_func",
+                "num_gw_samples",
+            )
+            self._jitted_likelihood_core = self.xp.jit(
+                _calculate_vectorized_log_likelihood_core,
+                static_argnames=static_arg_names,
+            )
+        else:
+            self._jitted_likelihood_core = None
 
         self._n_quad_points = 5
         self._quad_nodes, self._quad_weights = hermgauss(self._n_quad_points)
@@ -129,155 +260,136 @@ class H0LogLikelihood:
         return base_distance / H0_val
 
     def __call__(self, theta):
-        H0 = theta[0]
-        # logger.debug(f"H0LogLikelihood.__call__ with H0 = {H0}, vectorized = {self.use_vectorized_likelihood}")
-
-        if not (self.h0_min <= H0 <= self.h0_max):
-            # logger.debug(f"H0 = {H0} is outside prior range ({self.h0_min}, {self.h0_max}). Returning -inf.")
-            return -np.inf
-
-        try: 
-            model_d_for_hosts = self._lum_dist_model(self.z_values, H0)
-            # logger.debug(f"model_d_for_hosts (first 5 if available): {model_d_for_hosts[:min(5, len(model_d_for_hosts))]}") 
-            if np.any(~np.isfinite(model_d_for_hosts)): 
-                # logger.debug(f"Non-finite values in model_d_for_hosts for H0 = {H0}. Example: {model_d_for_hosts[~np.isfinite(model_d_for_hosts)][:min(5, len(model_d_for_hosts[~np.isfinite(model_d_for_hosts)]))]}") 
-                return -np.inf 
-        except Exception as e: 
-            # logger.debug(f"EXCEPTION in _lum_dist_model for H0 = {H0}: {e}") 
-            return -np.inf 
-        
-        sigma_d_val_for_hosts = (model_d_for_hosts / self.c_val) * self.sigma_v
-        sigma_d_val_for_hosts = np.maximum(sigma_d_val_for_hosts, 1e-9) 
-        # logger.debug(f"sigma_d_val_for_hosts (first 5 if available): {sigma_d_val_for_hosts[:min(5, len(sigma_d_val_for_hosts))]}") 
-        if np.any(~np.isfinite(sigma_d_val_for_hosts)): 
-            # logger.debug(f"Non-finite values in sigma_d_val_for_hosts for H0 = {H0}.") 
-            return -np.inf
-
-        log_sum_over_gw_samples = np.array([-np.inf]) # Placeholder for now
+        if self.backend_name == "jax" and self._jitted_likelihood_core is not None:
+            return self._jitted_likelihood_core(
+                theta=theta,
+                dL_gw_samples=self.dL_gw_samples,
+                mass_proxy_values=self.mass_proxy_values,
+                base_dl_for_hosts=self._base_dl_for_hosts,
+                sigma_v_pec=self.sigma_v,
+                c_light=self.c_val,
+                h0_min=self.h0_min,
+                h0_max=self.h0_max,
+                alpha_min=self.alpha_min,
+                alpha_max=self.alpha_max,
+                xp=self.xp,
+                log_gaussian_func=self._log_gaussian_func,
+                num_gw_samples=self._num_gw_samples,
+            )
 
         if self.use_vectorized_likelihood:
-            # --- Fully Vectorized Alternative ---
-            # logger.debug("Using fully vectorized likelihood path.")
-            try:
-                # Reshape for broadcasting: 
-                # self.dL_gw_samples: (N_samples,) -> (N_samples, 1)
-                # model_d_for_hosts: (N_hosts,) -> (1, N_hosts)
-                # sigma_d_val_for_hosts: (N_hosts,) -> (1, N_hosts)
-                log_pdf_values_full = norm.logpdf(
-                    self.dL_gw_samples[:, np.newaxis],
-                    loc=model_d_for_hosts[np.newaxis, :],
-                    scale=sigma_d_val_for_hosts[np.newaxis, :]
-                ) # Shape: (N_samples, N_hosts)
-            except Exception as e:
-                # logger.debug(f"EXCEPTION in norm.logpdf (vectorized) for H0 = {H0}: {e}")
-                # If the entire logpdf calculation fails, it likely means a broad issue
-                # (e.g. H0 way off, leading to bad model_d_for_hosts for ALL hosts)
-                # In this case, returning -np.inf for the whole likelihood is appropriate.
-                return -np.inf
+            return _calculate_vectorized_log_likelihood_core(
+                theta=theta,
+                dL_gw_samples=self.dL_gw_samples,
+                mass_proxy_values=self.mass_proxy_values,
+                base_dl_for_hosts=self._base_dl_for_hosts,
+                sigma_v_pec=self.sigma_v,
+                c_light=self.c_val,
+                h0_min=self.h0_min,
+                h0_max=self.h0_max,
+                alpha_min=self.alpha_min,
+                alpha_max=self.alpha_max,
+                xp=self.xp,
+                log_gaussian_func=self._log_gaussian_func,
+                num_gw_samples=self._num_gw_samples,
+            )
 
-            # Handle potential NaNs by converting them to -np.inf.
-            # This allows logaddexp.reduce to correctly ignore them unless an entire column is -np.inf.
-            log_pdf_values_full[np.isnan(log_pdf_values_full)] = -np.inf
+        # --- Memory-Efficient Loop with Redshift Marginalization ---
+        H0, alpha = theta
+        if not (self.h0_min <= H0 <= self.h0_max):
+            return -self.xp.inf
 
-            # Check if any galaxy (column) resulted in all -np.inf values for its log_pdf terms.
-            # This can happen if a specific galaxy's model_d or sigma_d was problematic.
-            # all_inf_columns = np.all(log_pdf_values_full == -np.inf, axis=0)
+        try:
+            model_d_for_hosts = self._lum_dist_model(self.z_values, H0)
+            if self.xp.any(~self.xp.isfinite(model_d_for_hosts)):
+                return -self.xp.inf
+        except Exception:
+            return -self.xp.inf
 
-            log_sum_over_gw_samples = np.logaddexp.reduce(log_pdf_values_full, axis=0) - np.log(len(self.dL_gw_samples))
-            
-            # After reduction, if any element in log_sum_over_gw_samples is -np.inf 
-            # (e.g., because its corresponding column in log_pdf_values_full was all -np.inf, 
-            # or because logaddexp.reduce itself resulted in -inf due to underflow with very small numbers),
-            # it will correctly propagate.
-            # No specific check for all_inf_columns is strictly needed here because logaddexp.reduce handles it.
-            
-            # logger.debug(f"log_sum_over_gw_samples (vectorized) shape: {log_sum_over_gw_samples.shape}, any non-finite: {np.any(~np.isfinite(log_sum_over_gw_samples))}")
-            # Example: Check first 5 values if problematic
-            if np.any(~np.isfinite(log_sum_over_gw_samples)):
-                # logger.debug(f"  Non-finite log_sum_over_gw_samples (vectorized): {log_sum_over_gw_samples[~np.isfinite(log_sum_over_gw_samples)][:5]}")
-                return -np.inf
+        sigma_d_val_for_hosts = (model_d_for_hosts / self.c_val) * self.sigma_v
+        sigma_d_val_for_hosts = self.xp.maximum(sigma_d_val_for_hosts, 1e-9)
+        if self.xp.any(~self.xp.isfinite(sigma_d_val_for_hosts)):
+            return -self.xp.inf
 
-        else:
-            # --- Memory-Efficient Loop with Redshift Marginalization ---
-            log_P_data_H0_zi_terms = np.zeros(len(self.z_values))
-            for i in range(len(self.z_values)):
-                mu_z = self.z_values[i]
-                sigma_z = self.z_err_values[i]
+        log_P_data_H0_zi_terms = self.xp.zeros(len(self.z_values))
+        for i in range(len(self.z_values)):
+            mu_z = self.z_values[i]
+            sigma_z = self.z_err_values[i]
 
-                if sigma_z < 1e-4:
-                    current_model_d = model_d_for_hosts[i]
-                    current_sigma_d = sigma_d_val_for_hosts[i]
-                    try:
-                        log_pdf_for_one_galaxy = norm.logpdf(
-                            self.dL_gw_samples,
-                            loc=current_model_d,
-                            scale=current_sigma_d,
-                        )
-                    except Exception:
-                        log_pdf_for_one_galaxy = np.full(len(self.dL_gw_samples), -np.inf)
-
-                    if np.any(~np.isfinite(log_pdf_for_one_galaxy)):
-                        log_P_data_H0_zi_terms[i] = -np.inf
-                    else:
-                        log_P_data_H0_zi_terms[i] = (
-                            np.logaddexp.reduce(log_pdf_for_one_galaxy)
-                            - np.log(len(self.dL_gw_samples))
-                        )
-                    continue
-
-                integrated_prob = 0.0
-                for node, weight in zip(self._quad_nodes, self._quad_weights):
-                    z_j = mu_z + np.sqrt(2.0) * sigma_z * node
-                    if z_j <= 0:
-                        continue
-                    model_d = self._lum_dist_model(z_j, H0)
-                    sigma_d = max((model_d / self.c_val) * self.sigma_v, 1e-9)
-                    try:
-                        log_pdf = norm.logpdf(
-                            self.dL_gw_samples,
-                            loc=model_d,
-                            scale=sigma_d,
-                        )
-                    except Exception:
-                        continue
-                    if np.any(~np.isfinite(log_pdf)):
-                        continue
-                    P_event = np.exp(logsumexp(log_pdf) - np.log(len(self.dL_gw_samples)))
-                    integrated_prob += (weight / np.sqrt(np.pi)) * P_event
-
-                if integrated_prob > 0:
-                    log_P_data_H0_zi_terms[i] = np.log(integrated_prob)
+            if sigma_z < 1e-4:
+                current_model_d = model_d_for_hosts[i]
+                current_sigma_d = sigma_d_val_for_hosts[i]
+                log_pdf_for_one_galaxy = self._log_gaussian_func(
+                    self.xp,
+                    self.dL_gw_samples,
+                    current_model_d,
+                    current_sigma_d,
+                )
+                if self.xp.any(~self.xp.isfinite(log_pdf_for_one_galaxy)):
+                    log_P_data_H0_zi_terms[i] = -self.xp.inf
                 else:
-                    log_P_data_H0_zi_terms[i] = -np.inf
+                    log_P_data_H0_zi_terms[i] = (
+                        self.xp.logaddexp.reduce(log_pdf_for_one_galaxy)
+                        - self.xp.log(self._num_gw_samples)
+                    )
+                continue
 
-            log_sum_over_gw_samples = log_P_data_H0_zi_terms
-            # logger.debug(f"log_sum_over_gw_samples (iterative per galaxy) shape: {log_sum_over_gw_samples.shape}, any non-finite: {np.any(~np.isfinite(log_sum_over_gw_samples))}")
+            integrated_prob = 0.0
+            for node, weight in zip(self._quad_nodes, self._quad_weights):
+                z_j = mu_z + self.xp.sqrt(2.0) * sigma_z * node
+                if z_j <= 0:
+                    continue
+                model_d = self._lum_dist_model(z_j, H0)
+                sigma_d = self.xp.maximum((model_d / self.c_val) * self.sigma_v, 1e-9)
+                log_pdf = self._log_gaussian_func(
+                    self.xp,
+                    self.dL_gw_samples,
+                    model_d,
+                    sigma_d,
+                )
+                if self.xp.any(~self.xp.isfinite(log_pdf)):
+                    continue
+                P_event = self.xp.exp(
+                    self.xp.logaddexp.reduce(log_pdf) - self.xp.log(self._num_gw_samples)
+                )
+                integrated_prob += (weight / self.xp.sqrt(self.xp.pi)) * P_event
+
+            if integrated_prob > 0:
+                log_P_data_H0_zi_terms[i] = self.xp.log(integrated_prob)
+            else:
+                log_P_data_H0_zi_terms[i] = -self.xp.inf
+
+        log_sum_over_gw_samples = log_P_data_H0_zi_terms
 
         alpha = theta[1]
         if not (self.alpha_min <= alpha <= self.alpha_max):
-            return -np.inf
+            return -self.xp.inf
 
-        if np.isclose(alpha, 0.0):
-            weights = np.full(len(self.mass_proxy_values), 1.0 / len(self.mass_proxy_values))
+        if self.xp.isclose(alpha, 0.0):
+            weights = self.xp.full(
+                len(self.mass_proxy_values), 1.0 / len(self.mass_proxy_values)
+            )
         else:
             powered = self.mass_proxy_values ** alpha
-            if np.any(powered <= 0) or not np.all(np.isfinite(powered)):
-                return -np.inf
+            if self.xp.any(powered <= 0) or self.xp.any(~self.xp.isfinite(powered)):
+                return -self.xp.inf
             denom = powered.sum()
-            if not np.isfinite(denom) or denom <= 0:
-                return -np.inf
+            if denom <= 0 or not np.isfinite(denom):
+                return -self.xp.inf
             weights = powered / denom
 
-        valid_mask = weights > 0
-        if not np.any(valid_mask):
-            return -np.inf
+        valid_mask = (weights > 0) & self.xp.isfinite(log_sum_over_gw_samples)
+        if not self.xp.any(valid_mask):
+            return -self.xp.inf
 
-        total_log_likelihood = logsumexp(np.log(weights[valid_mask]) + log_sum_over_gw_samples[valid_mask])
+        total_log_likelihood = self.xp.logaddexp.reduce(
+            self.xp.log(weights[valid_mask]) + log_sum_over_gw_samples[valid_mask]
+        )
 
-        if not np.isfinite(total_log_likelihood):
-            return -np.inf
+        if not self.xp.isfinite(total_log_likelihood):
+            return -self.xp.inf
 
-        return total_log_likelihood
+        return float(total_log_likelihood)
 
 def get_log_likelihood_h0(
     dL_gw_samples,

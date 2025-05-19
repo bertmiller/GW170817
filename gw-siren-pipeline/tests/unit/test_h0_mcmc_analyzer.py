@@ -259,13 +259,58 @@ def test_h0_loglikelihood_weight_application(
     dL_gw_samples = np.array([100.0])
     host_z = np.full(len(mass_proxy_values), 0.1)
 
-    likelihood = H0LogLikelihood(dL_gw_samples, host_z, mass_proxy_values, np.zeros_like(host_z))
-
     # Force per-galaxy log likelihood terms to zero so only weights matter
     mocker.patch(
-        "gwsiren.h0_mcmc_analyzer.norm.logpdf",
-        side_effect=lambda x, loc=None, scale=None: np.zeros_like(x),
+        "gwsiren.h0_mcmc_analyzer.log_gaussian",
+        side_effect=lambda xp, x, mu=None, sigma=None: np.zeros_like(x),
     )
+
+    likelihood = H0LogLikelihood(dL_gw_samples, host_z, mass_proxy_values, np.zeros_like(host_z))
 
     actual_log_L = likelihood([70.0, alpha_input])
     assert np.isclose(actual_log_L, expected_log_L)
+
+
+class FakeJaxNp:
+    """Minimal JAX NumPy stub providing ``jit`` and NumPy functionality."""
+
+    def __getattr__(self, name):
+        if name == "jit":
+            def _jit(func=None, static_argnames=None):
+                return func
+
+            return _jit
+        return getattr(np, name)
+
+
+def test_h0loglikelihood_jax_backend_vectorized_matches_numpy(mock_config):
+    dL_gw_samples = np.array([50.0, 60.0])
+    host_z = np.array([0.01, 0.015])
+    mass_proxy = np.array([1.0, 2.0])
+    z_err = np.zeros_like(host_z)
+
+    fake_jnp = FakeJaxNp()
+
+    ll_jax = H0LogLikelihood(
+        dL_gw_samples,
+        host_z,
+        mass_proxy,
+        z_err,
+        use_vectorized_likelihood=True,
+        xp=fake_jnp,
+        backend_name="jax",
+    )
+
+    ll_np = H0LogLikelihood(
+        dL_gw_samples,
+        host_z,
+        mass_proxy,
+        z_err,
+        use_vectorized_likelihood=True,
+    )
+
+    result_jax = ll_jax([70.0, 0.0])
+    result_np = ll_np([70.0, 0.0])
+
+    assert ll_jax._jitted_likelihood_core is not None
+    assert np.isclose(result_jax, result_np)
