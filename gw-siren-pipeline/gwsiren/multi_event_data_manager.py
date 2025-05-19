@@ -103,6 +103,72 @@ def _load_or_fetch_gw_posteriors(
     return dl_samples, ra_samples, dec_samples
 
 
+def _extract_processing_parameters(event_cfg_entry: Dict) -> Dict:
+    """Extract processing parameters from the event configuration."""
+    raw_proc_params = event_cfg_entry.get("single_event_processing_params")
+    proc_params = raw_proc_params if raw_proc_params is not None else {}
+    return {
+        "nside": proc_params.get("nside_skymap", event_cfg_entry.get("nside_skymap", NSIDE_SKYMAP)),
+        "cdf": proc_params.get("cdf_threshold", event_cfg_entry.get("cdf_threshold", CDF_THRESHOLD)),
+        "catalog": proc_params.get("catalog_type", event_cfg_entry.get("catalog_type", CATALOG_TYPE)),
+        "z_fallback": proc_params.get(
+            "host_z_max_fallback", event_cfg_entry.get("host_z_max_fallback", HOST_Z_MAX_FALLBACK)
+        ),
+    }
+
+
+def _get_candidate_galaxy_cache_file(
+    event_id: str, catalog: str, nside: int, cdf: float, z_fallback: float
+) -> Path:
+    """Determine the cache file path for candidate galaxies."""
+    cache_dir = "cache/candidate_galaxies"
+    me_cfg = getattr(CONFIG, "multi_event_analysis", None)
+    if me_cfg and me_cfg.run_settings and me_cfg.run_settings.candidate_galaxy_cache_dir:
+        cache_dir = me_cfg.run_settings.candidate_galaxy_cache_dir
+    cache_path = Path(cache_dir)
+    cache_path.mkdir(parents=True, exist_ok=True)
+
+    cat_key = catalog.replace("/", "_").replace(" ", "_")
+    cache_file = cache_path / f"{event_id}_cat_{cat_key}_n{nside}_cdf{cdf}_zfb{z_fallback}.csv"
+    return cache_file
+
+
+def _load_or_generate_candidate_galaxies(
+    event_id: str,
+    cache_file: Path,
+    dl_samples: np.ndarray,
+    nside: int,
+    cdf: float,
+    catalog: str,
+    z_fallback: float,
+) -> pd.DataFrame:
+    """Load candidate galaxies from cache or generate them if missing."""
+    if cache_file.exists():
+        logger.info("Loading cached candidate galaxies for %s from %s", event_id, cache_file)
+        return pd.read_csv(cache_file)
+
+    logger.info("Generating data for %s", event_id)
+    results = run_full_analysis(
+        event_id,
+        perform_mcmc=False,
+        nside_skymap=nside,
+        cdf_threshold=cdf,
+        catalog_type=catalog,
+        host_z_max_fallback=z_fallback,
+    )
+    if results.get("error"):
+        raise RuntimeError(f"Data generation failed for {event_id}: {results['error']}")
+
+    candidate_df = results["candidate_hosts_df"]
+
+    try:
+        candidate_df.to_csv(cache_file, index=False)
+        logger.info("Saved candidate galaxies for %s to %s", event_id, cache_file)
+    except Exception as exc:  # pragma: no cover - unexpected I/O errors
+        logger.warning("Could not save candidate galaxies for %s: %s", event_id, exc)
+    return candidate_df
+
+
 def prepare_event_data(event_cfg_entry: Dict) -> EventDataPackage:
     """Prepare data for a single event.
 
@@ -122,52 +188,19 @@ def prepare_event_data(event_cfg_entry: Dict) -> EventDataPackage:
     """
     event_id = event_cfg_entry["event_id"]
 
-    raw_proc_params = event_cfg_entry.get("single_event_processing_params")
-    proc_params = raw_proc_params if raw_proc_params is not None else {}
-    nside = proc_params.get("nside_skymap", event_cfg_entry.get("nside_skymap", NSIDE_SKYMAP))
-    cdf = proc_params.get("cdf_threshold", event_cfg_entry.get("cdf_threshold", CDF_THRESHOLD))
-    catalog = proc_params.get("catalog_type", event_cfg_entry.get("catalog_type", CATALOG_TYPE))
-    z_fallback = proc_params.get(
-        "host_z_max_fallback", event_cfg_entry.get("host_z_max_fallback", HOST_Z_MAX_FALLBACK)
-    )
-
-    cache_dir = "cache/candidate_galaxies"
-    me_cfg = getattr(CONFIG, "multi_event_analysis", None)
-    if me_cfg and me_cfg.run_settings and me_cfg.run_settings.candidate_galaxy_cache_dir:
-        cache_dir = me_cfg.run_settings.candidate_galaxy_cache_dir
-    cache_path = Path(cache_dir)
-    cache_path.mkdir(parents=True, exist_ok=True)
-
-    cat_key = catalog.replace("/", "_").replace(" ", "_")
-    cache_file = cache_path / f"{event_id}_cat_{cat_key}_n{nside}_cdf{cdf}_zfb{z_fallback}.csv"
+    processing_params = _extract_processing_parameters(event_cfg_entry)
+    nside = processing_params["nside"]
+    cdf = processing_params["cdf"]
+    catalog = processing_params["catalog"]
+    z_fallback = processing_params["z_fallback"]
 
     dl_samples, _, _ = _load_or_fetch_gw_posteriors(event_id)
+    
+    cache_file = _get_candidate_galaxy_cache_file(event_id, catalog, nside, cdf, z_fallback)
 
-    if cache_file.exists():
-        logger.info("Loading cached candidate galaxies for %s from %s", event_id, cache_file)
-        candidate_df = pd.read_csv(cache_file)
-        return EventDataPackage(event_id=event_id, dl_samples=dl_samples, candidate_galaxies_df=candidate_df)
-
-    logger.info("Generating data for %s", event_id)
-    results = run_full_analysis(
-        event_id,
-        perform_mcmc=False,
-        nside_skymap=nside,
-        cdf_threshold=cdf,
-        catalog_type=catalog,
-        host_z_max_fallback=z_fallback,
+    candidate_df = _load_or_generate_candidate_galaxies(
+        event_id, cache_file, dl_samples, nside, cdf, catalog, z_fallback
     )
-    if results.get("error"):
-        raise RuntimeError(f"Data generation failed for {event_id}: {results['error']}")
-
-    dl_samples = results["dL_samples"]
-    candidate_df = results["candidate_hosts_df"]
-
-    try:
-        candidate_df.to_csv(cache_file, index=False)
-        logger.info("Saved candidate galaxies for %s to %s", event_id, cache_file)
-    except Exception as exc:  # pragma: no cover - unexpected I/O errors
-        logger.warning("Could not save candidate galaxies for %s: %s", event_id, exc)
 
     return EventDataPackage(event_id=event_id, dl_samples=dl_samples, candidate_galaxies_df=candidate_df)
 
