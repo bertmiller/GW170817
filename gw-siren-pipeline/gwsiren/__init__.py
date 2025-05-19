@@ -21,6 +21,7 @@ from .multi_event_data_manager import (
     prepare_event_data,
     prepare_all_event_data,
 )
+from .combined_likelihood import CombinedLogLikelihood
 
 __all__ = [
     "Config",
@@ -39,6 +40,7 @@ __all__ = [
     "load_multi_event_config",
     "prepare_event_data",
     "prepare_all_event_data",
+    "CombinedLogLikelihood",
     "run_global_mcmc",
     "process_global_mcmc_samples",
     "save_global_samples",
