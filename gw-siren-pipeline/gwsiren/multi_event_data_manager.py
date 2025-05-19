@@ -18,17 +18,9 @@ from gwsiren.pipeline import (
     CATALOG_TYPE,
     HOST_Z_MAX_FALLBACK,
 )
+from gwsiren.event_data import EventDataPackage
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class EventDataPackage:
-    """Container for prepared event data."""
-
-    event_id: str
-    dl_samples: np.ndarray
-    candidate_galaxies_df: pd.DataFrame
 
 
 def load_multi_event_config(path: str | Path) -> List[Dict]:
