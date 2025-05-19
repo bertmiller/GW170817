@@ -41,6 +41,14 @@ Global settings such as catalogue paths, MCMC parameters, and cosmology assumpti
 
 To override the default config, set the environment variable `GWSIREN_CONFIG` to point to an alternative YAML file.
 
+### Multi-Event Configuration
+
+The optional `multi_event_analysis` section in `config.yaml` collects settings
+for combining multiple gravitational-wave events in a single run. When present,
+it defines which events to process, global priors on `H0` and `alpha`, optional
+MCMC overrides, and cosmology parameters. A minimal example is provided at the
+end of `config.yaml`.
+
 ## Running Tests
 
 Project tests are written with `pytest`. Execute them from the repository root:
