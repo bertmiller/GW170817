@@ -46,9 +46,9 @@ def test_full_multi_event_config(tmp_path):
             run_label: run1
             base_output_directory: out/
             candidate_galaxy_cache_dir: cache_gal/
+            gw_posteriors_cache_dir: gw_cache/
           events_to_combine:
             - event_id: EV1
-              gw_dl_samples_path: dl.npy
             - event_id: EV2
           priors:
             H0: {min: 50.0, max: 100.0}
@@ -76,6 +76,7 @@ def test_full_multi_event_config(tmp_path):
     assert me is not None
     assert me.run_settings.run_label == "run1"
     assert me.run_settings.candidate_galaxy_cache_dir == "cache_gal/"
+    assert me.run_settings.gw_posteriors_cache_dir == "gw_cache/"
     assert len(me.events_to_combine) == 2
     assert me.priors["H0"].max == 100.0
     assert me.mcmc.n_steps == 20

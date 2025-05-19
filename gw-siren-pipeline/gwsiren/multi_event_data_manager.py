@@ -1,8 +1,9 @@
 """Utilities for preparing data from multiple GW events.
 
 This module provides helpers to load or generate per-event data needed for a
-combined analysis. Candidate galaxy lists are cached to avoid repeatedly
-processing large galaxy catalogues.
+combined analysis. Candidate galaxy lists and the essential GW posterior
+samples (luminosity distance, RA and Dec) are cached to avoid repeated
+extraction from ``pesummary`` files.
 """
 
 from __future__ import annotations
@@ -56,25 +57,59 @@ def load_multi_event_config(path: str | Path) -> List[Dict]:
     return events
 
 
-def _fetch_dl_samples(event_id: str) -> np.ndarray:
-    """Fetch luminosity distance samples for a GW event."""
-    cache_dir = configure_astropy_cache(CONFIG.fetcher["cache_dir_name"])
-    if not cache_dir:
+def _load_or_fetch_gw_posteriors(
+    event_id: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Load cached GW posteriors or fetch and extract them if missing.
+
+    The cache location is determined by ``CONFIG.multi_event_analysis`` run
+    settings. Cached files are stored as ``<event_id>_gw_posteriors.npz`` and
+    contain ``dl``, ``ra`` and ``dec`` arrays.
+
+    Args:
+        event_id: Identifier of the GW event.
+
+    Returns:
+        Tuple ``(dL_samples, ra_samples, dec_samples)``.
+
+    Raises:
+        RuntimeError: If fetching or extraction fails.
+    """
+    cache_dir = "cache/gw_posteriors"
+    me_cfg = getattr(CONFIG, "multi_event_analysis", None)
+    if me_cfg and me_cfg.run_settings and me_cfg.run_settings.gw_posteriors_cache_dir:
+        cache_dir = me_cfg.run_settings.gw_posteriors_cache_dir
+    cache_path = Path(cache_dir)
+    cache_path.mkdir(parents=True, exist_ok=True)
+
+    cache_file = cache_path / f"{event_id}_gw_posteriors.npz"
+    if cache_file.exists():
+        logger.info("Loading cached GW posteriors for %s from %s", event_id, cache_file)
+        data = np.load(cache_file)
+        return data["dl"], data["ra"], data["dec"]
+
+    logger.info("Cache miss for GW posteriors for %s. Fetching and extracting...", event_id)
+    pesummary_cache = configure_astropy_cache(CONFIG.fetcher["cache_dir_name"])
+    if not pesummary_cache:
         raise RuntimeError("Failed to configure astropy cache")
-    success, gw_data_obj = fetch_candidate_data(event_id, cache_dir)
+    success, gw_data_obj = fetch_candidate_data(event_id, pesummary_cache)
     if not success:
         raise RuntimeError(f"Failed to fetch GW data: {gw_data_obj}")
-    dl_samples, _, _ = extract_gw_event_parameters(gw_data_obj, event_id)
-    if dl_samples is None:
+    dl_samples, ra_samples, dec_samples = extract_gw_event_parameters(gw_data_obj, event_id)
+    if dl_samples is None or ra_samples is None or dec_samples is None:
         raise RuntimeError("Essential GW parameters are missing")
-    return dl_samples
+    np.savez(cache_file, dl=dl_samples, ra=ra_samples, dec=dec_samples)
+    logger.info("Saved extracted GW posteriors for %s to %s", event_id, cache_file)
+    return dl_samples, ra_samples, dec_samples
 
 
 def prepare_event_data(event_cfg_entry: Dict) -> EventDataPackage:
     """Prepare data for a single event.
 
-    This loads pre-computed data if paths are provided and valid; otherwise it
-    triggers generation via :func:`run_full_analysis`.
+    This first ensures the GW posterior samples (``dL``, ``ra``, ``dec``) are
+    available, loading them from the configured cache or fetching them if
+    necessary. Candidate galaxy lists are then loaded from cache when
+    available; otherwise they are generated via :func:`run_full_analysis`.
 
     Args:
         event_cfg_entry: Configuration dictionary for the event.
@@ -106,20 +141,11 @@ def prepare_event_data(event_cfg_entry: Dict) -> EventDataPackage:
     cat_key = catalog.replace("/", "_").replace(" ", "_")
     cache_file = cache_path / f"{event_id}_cat_{cat_key}_n{nside}_cdf{cdf}_zfb{z_fallback}.csv"
 
-    dl_samples = None
-    dl_path = event_cfg_entry.get("gw_dl_samples_path")
-    if dl_path:
-        dl_file = Path(dl_path)
-        if dl_file.exists():
-            dl_samples = np.load(dl_file)
-        else:
-            logger.warning("gw_dl_samples_path not found for %s", event_id)
+    dl_samples, _, _ = _load_or_fetch_gw_posteriors(event_id)
 
     if cache_file.exists():
         logger.info("Loading cached candidate galaxies for %s from %s", event_id, cache_file)
         candidate_df = pd.read_csv(cache_file)
-        if dl_samples is None:
-            dl_samples = _fetch_dl_samples(event_id)
         return EventDataPackage(event_id=event_id, dl_samples=dl_samples, candidate_galaxies_df=candidate_df)
 
     logger.info("Generating data for %s", event_id)
