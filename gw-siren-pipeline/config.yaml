@@ -26,3 +26,27 @@ fetcher:
   cache_dir_name:  pesummary_cache
   timeout:         30
   max_retries:     3
+
+# Example settings for combining multiple events
+multi_event_analysis:
+  run_settings:
+    run_label: "demo_run"
+    base_output_directory: "output/multi_event_runs/"
+  events_to_combine:
+    - event_id: "GW170817"
+      # gw_dl_samples_path: "precomputed/GW170817/dL_samples.npy"
+      # candidate_galaxies_path: "precomputed/GW170817/hosts.csv"
+    - event_id: "GW190814"
+  priors:
+    H0: { min: 10.0, max: 200.0 }
+    alpha: { min: -2.0, max: 2.0 }
+  mcmc:
+    n_walkers: 100
+    n_steps: 5000
+    burnin: 1000
+    thin_by: 10
+    initial_pos_config:
+      H0: { mean: 70.0, std: 5.0 }
+      alpha: { mean: 0.0, std: 0.2 }
+  cosmology:
+    sigma_v_pec: 300.0
