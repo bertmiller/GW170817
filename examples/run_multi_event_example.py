@@ -7,10 +7,10 @@ multi_event_analysis:
   run_settings:
     run_label: "demo_run"
     base_output_directory: "output/multi_event_runs/"
+    candidate_galaxy_cache_dir: "cache/candidate_galaxies/"
   events_to_combine:
     - event_id: "GW170817"
       # gw_dl_samples_path: "precomputed/GW170817/dL.npy"
-      # candidate_galaxies_path: "precomputed/GW170817/hosts.csv"
     - event_id: "GW190814"
       single_event_processing_params:
         catalog_type: "glade+"
