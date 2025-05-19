@@ -87,7 +87,8 @@ def prepare_event_data(event_cfg_entry: Dict) -> EventDataPackage:
     """
     event_id = event_cfg_entry["event_id"]
 
-    proc_params = event_cfg_entry.get("single_event_processing_params", {})
+    raw_proc_params = event_cfg_entry.get("single_event_processing_params")
+    proc_params = raw_proc_params if raw_proc_params is not None else {}
     nside = proc_params.get("nside_skymap", event_cfg_entry.get("nside_skymap", NSIDE_SKYMAP))
     cdf = proc_params.get("cdf_threshold", event_cfg_entry.get("cdf_threshold", CDF_THRESHOLD))
     catalog = proc_params.get("catalog_type", event_cfg_entry.get("catalog_type", CATALOG_TYPE))
