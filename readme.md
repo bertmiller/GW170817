@@ -46,8 +46,10 @@ To override the default config, set the environment variable `GWSIREN_CONFIG` to
 The optional `multi_event_analysis` section in `config.yaml` collects settings
 for combining multiple gravitational-wave events in a single run. When present,
 it defines which events to process, global priors on `H0` and `alpha`, optional
-MCMC overrides, and cosmology parameters. A minimal example is provided at the
-end of `config.yaml`.
+MCMC overrides, and cosmology parameters. Candidate galaxy lists generated for
+each event are cached in the directory specified by
+`multi_event_analysis.run_settings.candidate_galaxy_cache_dir` to speed up
+subsequent runs. A minimal example is provided at the end of `config.yaml`.
 
 To execute a multi-event run, call the orchestrator script:
 

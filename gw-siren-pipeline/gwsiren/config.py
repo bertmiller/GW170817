@@ -84,7 +84,6 @@ class MEEventToCombine:
 
     event_id: str
     gw_dl_samples_path: Optional[str] = None
-    candidate_galaxies_path: Optional[str] = None
     single_event_processing_params: Optional[Dict[str, object]] = None
 
 
@@ -94,6 +93,7 @@ class MERunSettings:
 
     run_label: Optional[str] = None
     base_output_directory: Optional[str] = None
+    candidate_galaxy_cache_dir: Optional[str] = "cache/candidate_galaxies/"
 
 
 @dataclass(frozen=True)
@@ -124,7 +124,6 @@ def _parse_multi_event_config(raw: Dict) -> MultiEventAnalysisSettings:
             MEEventToCombine(
                 event_id=entry["event_id"],
                 gw_dl_samples_path=entry.get("gw_dl_samples_path"),
-                candidate_galaxies_path=entry.get("candidate_galaxies_path"),
                 single_event_processing_params=entry.get(
                     "single_event_processing_params"
                 ),

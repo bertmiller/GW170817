@@ -1,9 +1,13 @@
-"""Utilities for preparing data from multiple GW events."""
+"""Utilities for preparing data from multiple GW events.
+
+This module provides helpers to load or generate per-event data needed for a
+combined analysis. Candidate galaxy lists are cached to avoid repeatedly
+processing large galaxy catalogues.
+"""
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Dict
 
@@ -18,6 +22,9 @@ from gwsiren.pipeline import (
     CATALOG_TYPE,
     HOST_Z_MAX_FALLBACK,
 )
+from gwsiren import CONFIG
+from gwsiren.gw_data_fetcher import configure_astropy_cache, fetch_candidate_data
+from gwsiren.event_data_extractor import extract_gw_event_parameters
 
 from gwsiren.event_data import EventDataPackage
 
@@ -49,23 +56,18 @@ def load_multi_event_config(path: str | Path) -> List[Dict]:
     return events
 
 
-def _load_precomputed_data(entry: Dict) -> EventDataPackage | None:
-    dl_path = entry.get("gw_dl_samples_path")
-    gal_path = entry.get("candidate_galaxies_path")
-    if not dl_path or not gal_path:
-        return None
-    dl_file = Path(dl_path)
-    gal_file = Path(gal_path)
-    if not (dl_file.exists() and gal_file.exists()):
-        logger.warning("Pre-computed files not found for %s", entry["event_id"])
-        return None
-    try:
-        dl_samples = np.load(dl_file)
-        df = pd.read_csv(gal_file)
-    except Exception as exc:  # pragma: no cover - unexpected I/O errors
-        logger.error("Failed loading pre-computed data for %s: %s", entry["event_id"], exc)
-        raise
-    return EventDataPackage(event_id=entry["event_id"], dl_samples=dl_samples, candidate_galaxies_df=df)
+def _fetch_dl_samples(event_id: str) -> np.ndarray:
+    """Fetch luminosity distance samples for a GW event."""
+    cache_dir = configure_astropy_cache(CONFIG.fetcher["cache_dir_name"])
+    if not cache_dir:
+        raise RuntimeError("Failed to configure astropy cache")
+    success, gw_data_obj = fetch_candidate_data(event_id, cache_dir)
+    if not success:
+        raise RuntimeError(f"Failed to fetch GW data: {gw_data_obj}")
+    dl_samples, _, _ = extract_gw_event_parameters(gw_data_obj, event_id)
+    if dl_samples is None:
+        raise RuntimeError("Essential GW parameters are missing")
+    return dl_samples
 
 
 def prepare_event_data(event_cfg_entry: Dict) -> EventDataPackage:
@@ -83,15 +85,41 @@ def prepare_event_data(event_cfg_entry: Dict) -> EventDataPackage:
     Raises:
         RuntimeError: If data generation fails.
     """
-    loaded = _load_precomputed_data(event_cfg_entry)
-    if loaded is not None:
-        return loaded
-
     event_id = event_cfg_entry["event_id"]
-    nside = event_cfg_entry.get("nside_skymap", NSIDE_SKYMAP)
-    cdf = event_cfg_entry.get("cdf_threshold", CDF_THRESHOLD)
-    catalog = event_cfg_entry.get("catalog_type", CATALOG_TYPE)
-    z_fallback = event_cfg_entry.get("host_z_max_fallback", HOST_Z_MAX_FALLBACK)
+
+    proc_params = event_cfg_entry.get("single_event_processing_params", {})
+    nside = proc_params.get("nside_skymap", event_cfg_entry.get("nside_skymap", NSIDE_SKYMAP))
+    cdf = proc_params.get("cdf_threshold", event_cfg_entry.get("cdf_threshold", CDF_THRESHOLD))
+    catalog = proc_params.get("catalog_type", event_cfg_entry.get("catalog_type", CATALOG_TYPE))
+    z_fallback = proc_params.get(
+        "host_z_max_fallback", event_cfg_entry.get("host_z_max_fallback", HOST_Z_MAX_FALLBACK)
+    )
+
+    cache_dir = "cache/candidate_galaxies"
+    me_cfg = getattr(CONFIG, "multi_event_analysis", None)
+    if me_cfg and me_cfg.run_settings and me_cfg.run_settings.candidate_galaxy_cache_dir:
+        cache_dir = me_cfg.run_settings.candidate_galaxy_cache_dir
+    cache_path = Path(cache_dir)
+    cache_path.mkdir(parents=True, exist_ok=True)
+
+    cat_key = catalog.replace("/", "_").replace(" ", "_")
+    cache_file = cache_path / f"{event_id}_cat_{cat_key}_n{nside}_cdf{cdf}_zfb{z_fallback}.csv"
+
+    dl_samples = None
+    dl_path = event_cfg_entry.get("gw_dl_samples_path")
+    if dl_path:
+        dl_file = Path(dl_path)
+        if dl_file.exists():
+            dl_samples = np.load(dl_file)
+        else:
+            logger.warning("gw_dl_samples_path not found for %s", event_id)
+
+    if cache_file.exists():
+        logger.info("Loading cached candidate galaxies for %s from %s", event_id, cache_file)
+        candidate_df = pd.read_csv(cache_file)
+        if dl_samples is None:
+            dl_samples = _fetch_dl_samples(event_id)
+        return EventDataPackage(event_id=event_id, dl_samples=dl_samples, candidate_galaxies_df=candidate_df)
 
     logger.info("Generating data for %s", event_id)
     results = run_full_analysis(
@@ -106,8 +134,15 @@ def prepare_event_data(event_cfg_entry: Dict) -> EventDataPackage:
         raise RuntimeError(f"Data generation failed for {event_id}: {results['error']}")
 
     dl_samples = results["dL_samples"]
-    df = results["candidate_hosts_df"]
-    return EventDataPackage(event_id=event_id, dl_samples=dl_samples, candidate_galaxies_df=df)
+    candidate_df = results["candidate_hosts_df"]
+
+    try:
+        candidate_df.to_csv(cache_file, index=False)
+        logger.info("Saved candidate galaxies for %s to %s", event_id, cache_file)
+    except Exception as exc:  # pragma: no cover - unexpected I/O errors
+        logger.warning("Could not save candidate galaxies for %s: %s", event_id, exc)
+
+    return EventDataPackage(event_id=event_id, dl_samples=dl_samples, candidate_galaxies_df=candidate_df)
 
 
 def prepare_all_event_data(multi_event_config_path: str | Path) -> List[EventDataPackage]:
