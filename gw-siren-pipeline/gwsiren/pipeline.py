@@ -217,6 +217,7 @@ def run_full_analysis(
                 dL_samples,
                 candidate_hosts["z"].values,
                 candidate_hosts["mass_proxy"].values,
+                candidate_hosts["z_err"].values,
                 DEFAULT_SIGMA_V_PEC,
                 DEFAULT_C_LIGHT,
                 DEFAULT_OMEGA_M,

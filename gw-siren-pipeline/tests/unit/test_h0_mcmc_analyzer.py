@@ -86,7 +86,8 @@ def test_H0LogLikelihood_init_success(mock_config):
     host_z = np.array([0.02, 0.03])
 
     mass_proxy = np.array([1.0, 2.0])
-    ll = H0LogLikelihood(dL_gw_samples, host_z, mass_proxy)
+    z_err = np.array([0.0, 0.0])
+    ll = H0LogLikelihood(dL_gw_samples, host_z, mass_proxy, z_err)
 
     assert isinstance(ll, H0LogLikelihood)
     assert np.allclose(ll.dL_gw_samples, dL_gw_samples)
@@ -99,24 +100,24 @@ def test_H0LogLikelihood_init_success(mock_config):
     assert ll.use_vectorized_likelihood is False
 
     # Single-value sequence should also be stored as an array
-    ll_scalar = H0LogLikelihood(dL_gw_samples, [0.02], [1.0])
+    ll_scalar = H0LogLikelihood(dL_gw_samples, [0.02], [1.0], [0.0])
     assert np.allclose(ll_scalar.z_values, np.array([0.02]))
 
 
 @pytest.mark.parametrize("invalid_dl", [None, []])
 def test_H0LogLikelihood_init_invalid_dl_samples(invalid_dl, mock_config):
     with pytest.raises(ValueError, match="dL_gw_samples cannot be None or empty."):
-        H0LogLikelihood(invalid_dl, np.array([0.02]), np.array([1.0]))
+        H0LogLikelihood(invalid_dl, np.array([0.02]), np.array([1.0]), np.array([0.0]))
 
 
 @pytest.mark.parametrize("invalid_z", [None, []])
 def test_H0LogLikelihood_init_invalid_host_z(invalid_z, mock_config):
     with pytest.raises(ValueError, match="host_galaxies_z cannot be None or empty."):
-        H0LogLikelihood(np.array([100.0]), invalid_z, np.array([1.0]))
+        H0LogLikelihood(np.array([100.0]), invalid_z, np.array([1.0]), np.array([0.0]))
 
 
 def test_H0LogLikelihood_lum_dist_model_single_z(mock_config):
-    ll = H0LogLikelihood(np.array([10.0]), np.array([0.01]), np.array([1.0]))
+    ll = H0LogLikelihood(np.array([10.0]), np.array([0.01]), np.array([1.0]), np.array([0.0]))
     test_z = 0.05
     test_H0 = 70.0
     cosmo = FlatLambdaCDM(H0=test_H0 * u.km / u.s / u.Mpc, Om0=DEFAULT_OMEGA_M)
@@ -127,7 +128,7 @@ def test_H0LogLikelihood_lum_dist_model_single_z(mock_config):
 
 
 def test_H0LogLikelihood_lum_dist_model_array_z(mock_config):
-    ll = H0LogLikelihood(np.array([10.0]), np.array([0.01]), np.array([1.0]))
+    ll = H0LogLikelihood(np.array([10.0]), np.array([0.01]), np.array([1.0]), np.array([0.0]))
     test_z = np.array([0.05, 0.1])
     test_H0 = 70.0
     cosmo = FlatLambdaCDM(H0=test_H0 * u.km / u.s / u.Mpc, Om0=DEFAULT_OMEGA_M)
@@ -138,7 +139,7 @@ def test_H0LogLikelihood_lum_dist_model_array_z(mock_config):
 
 
 def test_H0LogLikelihood_lum_dist_model_z_zero(mock_config):
-    ll = H0LogLikelihood(np.array([10.0]), np.array([0.01]), np.array([1.0]))
+    ll = H0LogLikelihood(np.array([10.0]), np.array([0.01]), np.array([1.0]), np.array([0.0]))
     result = ll._lum_dist_model(0.0, 70.0)
     assert np.isclose(result, 0.0)
 
@@ -155,7 +156,7 @@ def test_lum_dist_model_uses_single_cosmology_instance(mock_config, mocker):
 
     mocker.patch('gwsiren.h0_mcmc_analyzer.FlatLambdaCDM', DummyCosmo)
 
-    ll = H0LogLikelihood(np.array([10.0]), np.array([0.01]), np.array([1.0]))
+    ll = H0LogLikelihood(np.array([10.0]), np.array([0.01]), np.array([1.0]), np.array([0.0]))
 
     ll._lum_dist_model(0.1, 70.0)
     ll._lum_dist_model(0.2, 70.0)
@@ -167,16 +168,19 @@ def test_call_vectorized_vs_looped_equivalence(mock_config):
     dL_gw_samples = np.array([50.0, 60.0, 70.0, 80.0])
     host_z = np.array([0.01, 0.015])
     mass_proxy = np.array([1.0, 2.0])
+    z_err = np.array([0.0, 0.0])
     likelihood_vectorized = H0LogLikelihood(
         dL_gw_samples,
         host_z,
         mass_proxy,
+        z_err,
         use_vectorized_likelihood=True,
     )
     likelihood_looped = H0LogLikelihood(
         dL_gw_samples,
         host_z,
         mass_proxy,
+        z_err,
         use_vectorized_likelihood=False,
     )
 
@@ -193,7 +197,7 @@ def test_get_log_likelihood_returns_H0LogLikelihood_instance(mock_config):
     dL_gw_samples = np.array([100.0, 110.0])
     host_z = np.array([0.02, 0.03])
 
-    instance = get_log_likelihood_h0(dL_gw_samples, host_z, np.ones_like(host_z))
+    instance = get_log_likelihood_h0(dL_gw_samples, host_z, np.ones_like(host_z), np.zeros_like(host_z))
     assert isinstance(instance, H0LogLikelihood)
 
 
@@ -201,7 +205,7 @@ def test_get_log_likelihood_chooses_vectorized_for_small_data(mock_config):
     dL_gw_samples = np.array([1.0] * 10)
     host_z = np.array([0.1] * 5)
 
-    instance = get_log_likelihood_h0(dL_gw_samples, host_z, np.ones_like(host_z))
+    instance = get_log_likelihood_h0(dL_gw_samples, host_z, np.ones_like(host_z), np.zeros_like(host_z))
     assert instance.use_vectorized_likelihood is True
 
 
@@ -213,7 +217,7 @@ def test_get_log_likelihood_chooses_looped_due_to_large_elements(mock_config):
     fake_samples = FakeArray(base_samples, 600_000_000)
     fake_hosts = FakeArray(base_hosts, 2)
 
-    instance = get_log_likelihood_h0(fake_samples, fake_hosts, np.ones_like(base_hosts))
+    instance = get_log_likelihood_h0(fake_samples, fake_hosts, np.ones_like(base_hosts), np.zeros_like(base_hosts))
     assert instance.use_vectorized_likelihood is False
 
 
@@ -225,6 +229,7 @@ def test_get_log_likelihood_passes_other_args_correctly(mock_config):
         dL_gw_samples,
         host_z,
         np.array([1.0]),
+        np.array([0.0]),
         sigma_v=500,
         h0_min=20,
         h0_max=180,
@@ -254,7 +259,7 @@ def test_h0_loglikelihood_weight_application(
     dL_gw_samples = np.array([100.0])
     host_z = np.full(len(mass_proxy_values), 0.1)
 
-    likelihood = H0LogLikelihood(dL_gw_samples, host_z, mass_proxy_values)
+    likelihood = H0LogLikelihood(dL_gw_samples, host_z, mass_proxy_values, np.zeros_like(host_z))
 
     # Force per-galaxy log likelihood terms to zero so only weights matter
     mocker.patch(

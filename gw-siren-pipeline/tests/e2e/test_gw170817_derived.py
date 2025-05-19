@@ -112,6 +112,7 @@ def test_e2e_gw170817_pipeline_with_derived_data(mocker, mock_config, tmp_path):
             "dec": [-23.383831, -23.34725, 33.74957],
             "z": [0.00968, 0.0102614451307, 0.0217207308604],
             "mass_proxy": [2.2, 0.03, 11.0],
+            "z_err": [0.001, 0.001, 0.001],
         }
     )
 
