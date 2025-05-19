@@ -22,6 +22,7 @@ from .multi_event_data_manager import (
     prepare_all_event_data,
 )
 from .combined_likelihood import CombinedLogLikelihood
+from .backends import log_gaussian
 
 __all__ = [
     "Config",
@@ -41,6 +42,7 @@ __all__ = [
     "prepare_event_data",
     "prepare_all_event_data",
     "CombinedLogLikelihood",
+    "log_gaussian",
     "run_global_mcmc",
     "process_global_mcmc_samples",
     "save_global_samples",
