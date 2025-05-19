@@ -24,6 +24,7 @@ from .multi_event_data_manager import (
 from .combined_likelihood import CombinedLogLikelihood
 from .backends import log_gaussian
 from .backends import get_xp
+from .backends import log_gaussian
 
 __all__ = [
     "Config",
