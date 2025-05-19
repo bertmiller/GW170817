@@ -15,6 +15,12 @@ from .global_mcmc import (
     process_global_mcmc_samples,
     save_global_samples,
 )
+from .multi_event_data_manager import (
+    EventDataPackage,
+    load_multi_event_config,
+    prepare_event_data,
+    prepare_all_event_data,
+)
 
 __all__ = [
     "Config",
@@ -32,4 +38,8 @@ __all__ = [
     "run_global_mcmc",
     "process_global_mcmc_samples",
     "save_global_samples",
+    "EventDataPackage",
+    "load_multi_event_config",
+    "prepare_event_data",
+    "prepare_all_event_data",
 ]
