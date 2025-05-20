@@ -314,3 +314,98 @@ def test_h0loglikelihood_jax_backend_vectorized_matches_numpy(mock_config):
 
     assert ll_jax._jitted_likelihood_core is not None
     assert np.isclose(result_jax, result_np)
+
+
+def test_get_log_likelihood_backend_agreement(monkeypatch, mock_config):
+    rng = np.random.default_rng(0)
+    dL_gw_samples = rng.normal(50.0, 5.0, size=20)
+    host_z = np.array([0.01, 0.015])
+    mass_proxy = np.array([1.0, 2.0])
+    z_err = np.zeros_like(host_z)
+
+    fake_jnp = FakeJaxNp()
+
+    def fake_get_xp(pref):
+        if pref == "jax":
+            return fake_jnp, "jax"
+        return np, "numpy"
+
+    monkeypatch.setattr("gwsiren.h0_mcmc_analyzer.get_xp", fake_get_xp)
+
+    ll_np = get_log_likelihood_h0(
+        dL_gw_samples,
+        host_z,
+        mass_proxy,
+        z_err,
+        backend_preference="numpy",
+    )
+    ll_jax = get_log_likelihood_h0(
+        dL_gw_samples,
+        host_z,
+        mass_proxy,
+        z_err,
+        backend_preference="jax",
+    )
+
+    assert ll_np.backend_name == "numpy"
+    assert ll_jax.backend_name == "jax"
+
+    thetas = [(60.0, 0.0), (70.0, 0.1), (80.0, -0.2)]
+    for theta in thetas:
+        np_val = ll_np(theta)
+        jax_val = ll_jax(theta)
+        np.testing.assert_allclose(np_val, jax_val, rtol=1e-8, atol=1e-8)
+
+
+def test_log_likelihood_prefers_true_theta(monkeypatch, mock_config):
+    host_z = np.array([0.01, 0.015, 0.02])
+    mass_proxy = np.ones_like(host_z)
+    z_err = np.zeros_like(host_z)
+
+    cosmo = FlatLambdaCDM(H0=70 * u.km / u.s / u.Mpc, Om0=DEFAULT_OMEGA_M)
+    dL_true = cosmo.luminosity_distance(0.015).value
+    rng = np.random.default_rng(1)
+    dL_gw_samples = rng.normal(dL_true, 2.0, size=50)
+
+    ll = get_log_likelihood_h0(
+        dL_gw_samples,
+        host_z,
+        mass_proxy,
+        z_err,
+        backend_preference="numpy",
+    )
+    ll_jax = get_log_likelihood_h0(
+        dL_gw_samples,
+        host_z,
+        mass_proxy,
+        z_err,
+        backend_preference="jax",
+    )
+
+    theta_map = (70.0, 0.0)
+    theta_perturbed = (80.0, 0.0)
+
+    assert ll(theta_map) > ll(theta_perturbed)
+    assert ll_jax(theta_map) > ll_jax(theta_perturbed)
+
+
+def test_get_log_likelihood_falls_back_when_jax_unavailable(monkeypatch, mock_config):
+    rng = np.random.default_rng(0)
+    dL_samples = rng.normal(30.0, 3.0, size=5)
+    host_z = np.array([0.01])
+    mp = np.array([1.0])
+    z_err = np.array([0.0])
+
+    monkeypatch.setattr(
+        "gwsiren.h0_mcmc_analyzer.get_xp", lambda pref: (np, "numpy")
+    )
+
+    ll = get_log_likelihood_h0(
+        dL_samples,
+        host_z,
+        mp,
+        z_err,
+        backend_preference="jax",
+    )
+
+    assert ll.backend_name == "numpy"

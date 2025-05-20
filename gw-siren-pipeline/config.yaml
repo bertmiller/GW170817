@@ -27,6 +27,10 @@ fetcher:
   timeout:         30
   max_retries:     3
 
+# Preferred numerical backend for likelihood calculations
+# Options: "auto", "numpy", "jax"
+backend: auto
+
 # Example settings for combining multiple events
 multi_event_analysis:
   run_settings:

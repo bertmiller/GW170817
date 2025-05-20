@@ -11,7 +11,7 @@ import cProfile
 import pstats
 import io
 from gwsiren import CONFIG
-from gwsiren.backends import log_gaussian
+from gwsiren.backends import log_gaussian, get_xp
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +153,8 @@ class H0LogLikelihood:
         alpha_max: Upper prior bound on ``alpha``.
         use_vectorized_likelihood: Whether to use the vectorised likelihood
             implementation.
+        xp: Numerical backend module to use (defaults to ``numpy``).
+        backend_name: Name of the selected backend.
     """
     def __init__(
         self,
@@ -403,6 +405,8 @@ def get_log_likelihood_h0(
     h0_max=DEFAULT_H0_PRIOR_MAX,
     alpha_min=DEFAULT_ALPHA_PRIOR_MIN,
     alpha_max=DEFAULT_ALPHA_PRIOR_MAX,
+    *,
+    backend_preference: str = "auto",
 ):
     """
     Returns an instance of the H0LogLikelihood class, dynamically choosing
@@ -454,6 +458,8 @@ def get_log_likelihood_h0(
             f"Exceeds threshold of {max_elements_for_vectorization:.0f} elements ({MEMORY_THRESHOLD_BYTES / (1024**3):.0f} GB)."
         )
 
+    xp_mod, backend_name = get_xp(backend_preference)
+
     return H0LogLikelihood(
         dL_gw_samples,
         host_galaxies_z,
@@ -467,6 +473,8 @@ def get_log_likelihood_h0(
         alpha_min,
         alpha_max,
         use_vectorized_likelihood=should_use_vectorized,
+        xp=xp_mod,
+        backend_name=backend_name,
     )
 
 def get_log_likelihood_h0_vectorized(

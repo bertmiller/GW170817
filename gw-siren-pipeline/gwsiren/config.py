@@ -180,6 +180,7 @@ class Config:
     cosmology: dict
     fetcher: dict
     multi_event_analysis: Optional[MultiEventAnalysisSettings] = None
+    backend: str = "auto"
 
 
 def load_config(path: str | pathlib.Path | None = None) -> Config:
