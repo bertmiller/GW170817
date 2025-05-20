@@ -30,6 +30,7 @@ def test_load_config_from_path(tmp_path):
           cache_dir_name: cache
           timeout:        5
           max_retries:    1
+        backend: jax
         """
     )
     path = tmp_path / "cfg.yaml"
@@ -41,6 +42,7 @@ def test_load_config_from_path(tmp_path):
     assert cfg.mcmc["steps"] == 50
     assert cfg.cosmology["omega_m"] == 0.3
     assert cfg.fetcher["timeout"] == 5
+    assert cfg.backend == "jax"
 
 
 def test_load_config_missing_file(tmp_path):
@@ -74,6 +76,7 @@ def test_load_config_default_path(mocker, project_root_dir):
           cache_dir_name: cache
           timeout: 5
           max_retries: 2
+        backend: auto
         """
     )
     mocker.patch("pathlib.Path.exists", return_value=True)
@@ -86,6 +89,7 @@ def test_load_config_default_path(mocker, project_root_dir):
     assert cfg.mcmc["walkers"] == 2
     assert cfg.cosmology["omega_m"] == 0.3
     assert cfg.fetcher["max_retries"] == 2
+    assert cfg.backend == "auto"
 
 
 def test_minimal_yaml_loader_valid_input():
