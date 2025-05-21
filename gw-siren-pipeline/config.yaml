@@ -22,6 +22,9 @@ cosmology:
   c_light:         299792.458
   omega_m:         0.31
 
+# Backend preference for numerical operations ("auto", "numpy", "jax")
+backend: auto
+
 fetcher:
   cache_dir_name:  pesummary_cache
   timeout:         30

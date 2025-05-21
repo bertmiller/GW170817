@@ -179,6 +179,7 @@ class Config:
     mcmc: dict
     cosmology: dict
     fetcher: dict
+    backend: str = "auto" # Added backend preference
     multi_event_analysis: Optional[MultiEventAnalysisSettings] = None
 
 

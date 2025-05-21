@@ -110,6 +110,7 @@ def run_full_analysis(
     cdf_threshold: float = CDF_THRESHOLD,
     catalog_type: str = CATALOG_TYPE,
     host_z_max_fallback: float = HOST_Z_MAX_FALLBACK,
+    backend_override: Optional[str] = None, # Added backend_override
 ) -> dict:
     """Execute the full analysis workflow for a GW event.
 
@@ -213,6 +214,14 @@ def run_full_analysis(
         results["candidate_hosts_df"] = candidate_hosts
 
         if perform_mcmc:
+            # Determine backend preference
+            if backend_override:
+                current_backend_preference = backend_override
+                logger.info(f"Using backend override: {current_backend_preference}")
+            else:
+                current_backend_preference = CONFIG.backend
+                logger.info(f"Using backend from config: {current_backend_preference}")
+
             log_likelihood = get_log_likelihood_h0(
                 dL_samples,
                 candidate_hosts["z"].values,
@@ -225,6 +234,7 @@ def run_full_analysis(
                 DEFAULT_H0_PRIOR_MAX,
                 DEFAULT_ALPHA_PRIOR_MIN,
                 DEFAULT_ALPHA_PRIOR_MAX,
+                backend_preference=current_backend_preference, # Pass backend preference
             )
 
             n_cores = os.cpu_count() or 1

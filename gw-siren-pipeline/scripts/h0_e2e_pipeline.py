@@ -36,6 +36,13 @@ def main() -> None:
         action="store_true",
         help="Enable debug logging",
     )
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default=None, # Default to None, so run_full_analysis uses config
+        choices=["auto", "numpy", "jax"],
+        help="Numerical backend to use ('auto', 'numpy', 'jax'). Overrides config if set."
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -49,7 +56,11 @@ def main() -> None:
     event_name = args.event_name
     logger.info("Starting analysis for %s", event_name)
 
-    results = run_full_analysis(event_name, perform_mcmc=True)
+    results = run_full_analysis(
+        event_name, 
+        perform_mcmc=True, 
+        backend_override=args.backend # Pass backend override
+    )
     if results.get("error"):
         logger.error("Pipeline failed: %s", results["error"])
         sys.exit(1)
