@@ -26,10 +26,10 @@ def generate_mock_data(num_gw_samples: int, num_hosts: int) -> Tuple[np.ndarray,
         Tuple containing arrays of GW distance samples, host galaxy redshifts,
         host galaxy mass proxies, and host redshift errors.
     """
-    dL_gw_samples = np.random.normal(loc=400.0, scale=50.0, size=num_gw_samples).astype(np.float64)
-    host_galaxies_z = np.random.uniform(0.01, 0.2, size=num_hosts).astype(np.float64)
-    host_galaxies_mass_proxy = np.random.lognormal(mean=np.log(1e10), sigma=0.5, size=num_hosts).astype(np.float64)
-    host_galaxies_z_err = (0.015 * (1.0 + host_galaxies_z)).astype(np.float64)
+    dL_gw_samples = np.random.normal(loc=400.0, scale=50.0, size=num_gw_samples).astype(np.float32)
+    host_galaxies_z = np.random.uniform(0.01, 0.2, size=num_hosts).astype(np.float32)
+    host_galaxies_mass_proxy = np.random.lognormal(mean=np.log(1e10), sigma=0.5, size=num_hosts).astype(np.float32)
+    host_galaxies_z_err = (0.015 * (1.0 + host_galaxies_z)).astype(np.float32)
     return dL_gw_samples, host_galaxies_z, host_galaxies_mass_proxy, host_galaxies_z_err
 
 
@@ -72,7 +72,7 @@ def main() -> None:
     """Entry point for the benchmark script."""
     parser = argparse.ArgumentParser(description="Benchmark NumPy vs JAX for the H0 likelihood")
     parser.add_argument("--num_gw_samples", type=int, default=1000, help="Number of GW distance samples")
-    parser.add_argument("--num_hosts", type=int, default=100000, help="Number of candidate host galaxies")
+    parser.add_argument("--num_hosts", type=int, default=10000, help="Number of candidate host galaxies")
     parser.add_argument("--num_evals", type=int, default=100, help="Number of likelihood evaluations to time")
     parser.add_argument("--num_warmup", type=int, default=10, help="Number of warm-up evaluations")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
