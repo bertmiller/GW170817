@@ -109,16 +109,39 @@ def execute_multi_event_analysis() -> None:
         }
 
     n_dim = 2
-    n_cores = os.cpu_count() or 1
-    with InterruptiblePool(n_cores) as pool:
+    
+    sampler = None
+    if CONFIG.computation.backend == "jax":
+        logger.info(
+            "JAX backend selected. emcee will run in serial mode (pool=None) "
+            "to avoid pickling issues with JAX objects across processes."
+        )
+        # Run MCMC in serial for JAX
+        # JAX can still use available accelerators (e.g., GPU) in the single process.
         sampler = run_global_mcmc(
             combined_ll,
             n_walkers=n_walkers,
             n_steps=n_steps,
             n_dim=n_dim,
             initial_pos_config=init_cfg,
-            pool=pool,
+            pool=None,  # Explicitly None for serial execution
         )
+    else:
+        # For non-JAX backends (e.g., NumPy), use the multiprocessing pool
+        n_cores = os.cpu_count() or 1
+        logger.info(
+            f"Non-JAX backend ({CONFIG.computation.backend}) selected. "
+            f"Initializing InterruptiblePool with {n_cores} cores."
+        )
+        with InterruptiblePool(n_cores) as pool:
+            sampler = run_global_mcmc(
+                combined_ll,
+                n_walkers=n_walkers,
+                n_steps=n_steps,
+                n_dim=n_dim,
+                initial_pos_config=init_cfg,
+                pool=pool,
+            )
 
     samples = process_global_mcmc_samples(sampler, burnin=burnin, thin_by=thin_by, n_dim=n_dim)
     if samples is None:

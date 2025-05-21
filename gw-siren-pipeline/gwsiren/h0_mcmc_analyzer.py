@@ -630,47 +630,48 @@ if __name__ == '__main__':
 
 
     if 'log_like_func' in locals(): # Proceed if likelihood function was created
-        # log_like_func is already obtained using test_backend_choice
-        # try:
-            # log_like_func = get_log_likelihood_h0( # This would re-create it, not needed if already created above
-            #     test_backend_choice,
-            #     mock_dL_gw, 
-            #     mock_host_zs, 
-            #     mock_mass_proxy, 
-            #     mock_z_err
-            # )
-            # logger.info(f"  Log likelihood function re-obtained with backend: {log_like_func.backend_name if hasattr(log_like_func, 'backend_name') else 'N/A'}")
+        try: # Add try block here
+            # log_like_func is already obtained using test_backend_choice
+            # try:
+                # log_like_func = get_log_likelihood_h0( # This would re-create it, not needed if already created above
+                #     test_backend_choice,
+                #     mock_dL_gw, 
+                #     mock_host_zs, 
+                #     mock_mass_proxy, 
+                #     mock_z_err
+                # )
+                # logger.info(f"  Log likelihood function re-obtained with backend: {log_like_func.backend_name if hasattr(log_like_func, 'backend_name') else 'N/A'}")
 
-        sampler = run_mcmc_h0(
-                log_like_func,
-                mock_event,
-                n_walkers=test_mcmc_walkers,
-                n_steps=test_mcmc_steps
-            )
+            sampler = run_mcmc_h0(
+                    log_like_func,
+                    mock_event,
+                    n_walkers=test_mcmc_walkers,
+                    n_steps=test_mcmc_steps
+                )
 
             if sampler:
-                # Process MCMC samples (this function remains largely numpy-based for now from emcee output)
-                h0_samples_processed = process_mcmc_samples(
-                    sampler,
-                    mock_event,
-                    burnin=test_mcmc_burnin,
-                    thin_by=2 # Small thin factor for test
-                )
-                if h0_samples_processed is not None and len(h0_samples_processed) > 0:
-                    logger.info(f"  Successfully ran MCMC and processed samples for {mock_event}.")
-                    logger.info(f"  Number of H0 samples obtained: {len(h0_samples_processed)}")
-                    # np.mean and np.std are fine here as h0_samples_processed is a NumPy array from emcee
-                    logger.info(f"  H0 mean: {np.mean(h0_samples_processed[:,0]):.2f}, H0 std: {np.std(h0_samples_processed[:,0]):.2f}")
-                    if h0_samples_processed.shape[1] > 1:
-                         logger.info(f"  Alpha mean: {np.mean(h0_samples_processed[:,1]):.2f}, Alpha std: {np.std(h0_samples_processed[:,1]):.2f}")
+                    # Process MCMC samples (this function remains largely numpy-based for now from emcee output)
+                    h0_samples_processed = process_mcmc_samples(
+                        sampler,
+                        mock_event,
+                        burnin=test_mcmc_burnin,
+                        thin_by=2 # Small thin factor for test
+                    )
+                    if h0_samples_processed is not None and len(h0_samples_processed) > 0:
+                        logger.info(f"  Successfully ran MCMC and processed samples for {mock_event}.")
+                        logger.info(f"  Number of H0 samples obtained: {len(h0_samples_processed)}")
+                        # np.mean and np.std are fine here as h0_samples_processed is a NumPy array from emcee
+                        logger.info(f"  H0 mean: {np.mean(h0_samples_processed[:,0]):.2f}, H0 std: {np.std(h0_samples_processed[:,0]):.2f}")
+                        if h0_samples_processed.shape[1] > 1:
+                             logger.info(f"  Alpha mean: {np.mean(h0_samples_processed[:,1]):.2f}, Alpha std: {np.std(h0_samples_processed[:,1]):.2f}")
 
-                elif h0_samples_processed is not None and len(h0_samples_processed) == 0:
-                    logger.warning("  MCMC processing resulted in zero samples. Check burn-in/thinning or chain length.")
-                else:
-                    logger.error("  MCMC processing failed to return valid samples.")
+                    elif h0_samples_processed is not None and len(h0_samples_processed) == 0:
+                        logger.warning("  MCMC processing resulted in zero samples. Check burn-in/thinning or chain length.")
+                    else:
+                        logger.error("  MCMC processing failed to return valid samples.")
             else:
-                logger.error("  MCMC run failed or returned no sampler. Cannot test processing.")
-        except Exception as e_mcmc_test:
+                    logger.error("  MCMC run failed or returned no sampler. Cannot test processing.")
+        except Exception as e_mcmc_test: # This except now correctly pairs with the try above
             logger.exception(f"  Error during MCMC test setup or execution with new backend logic: {e_mcmc_test}")
 
     else:

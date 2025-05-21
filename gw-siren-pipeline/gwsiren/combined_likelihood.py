@@ -72,6 +72,7 @@ class CombinedLogLikelihood:
         self.single_event_likelihoods = []
         for pkg in self.event_data_packages:
             ll = get_log_likelihood_h0(
+                requested_backend_str="auto",
                 dL_gw_samples=pkg.dl_samples,
                 host_galaxies_z=pkg.candidate_galaxies_df["z"].values,
                 host_galaxies_mass_proxy=pkg.candidate_galaxies_df[

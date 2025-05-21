@@ -27,7 +27,8 @@ def _is_apple_silicon_metal_available():
             if "METAL" in device.platform.upper() or "GPU" in device.device_kind.upper(): # A bit more general for Apple GPUs
                  # Check if we can actually perform a computation
                 try:
-                    _ = jax.device_put(jax.numpy.array([1.0]), device=device).block_until_ready()
+                    # Test with float32 for device availability check
+                    _ = jax.device_put(jax.numpy.array([1.0], dtype=jax.numpy.float32), device=device).block_until_ready()
                     return True
                 except Exception:
                     logger.debug(f"Found Metal device ({device.platform}), but computation test failed.")
@@ -47,7 +48,8 @@ def _is_nvidia_cuda_available():
             if "CUDA" in device.platform.upper() or "NVIDIA" in device.platform.upper():
                 # Check if we can actually perform a computation
                 try:
-                    _ = jax.device_put(jax.numpy.array([1.0]), device=device).block_until_ready()
+                    # Test with float32 for device availability check
+                    _ = jax.device_put(jax.numpy.array([1.0], dtype=jax.numpy.float32), device=device).block_until_ready()
                     return True
                 except Exception:
                     logger.debug(f"Found CUDA device ({device.platform}), but computation test failed.")
@@ -121,7 +123,8 @@ def get_xp(requested_backend="auto"):
                     if not cpu_devices:
                          raise BackendNotAvailableError("JAX found but no CPU devices reported.")
                     # Test a simple computation on JAX CPU
-                    _ = jax_module.device_put(jnp_module.array([1.0]), device=cpu_devices[0]).block_until_ready()
+                    # Test with float32 for device availability check
+                    _ = jax_module.device_put(jnp_module.array([1.0], dtype=jnp_module.float32), device=cpu_devices[0]).block_until_ready()
                     xp = jnp_module
                     backend_name = "jax"
                     device_name = "cpu" # Explicitly CPU
@@ -256,8 +259,7 @@ if __name__ == '__main__':
     logger.info("--- Testing get_xp ---")
 
     def test_backend(request_mode):
-        logger.info(f"
-Requesting backend: '{request_mode}'")
+        logger.info(f"Requesting backend: '{request_mode}'")
         try:
             xp_module, name, device = get_xp(request_mode)
             logger.info(f"  Successfully got: {name} on {device}")
