@@ -3,6 +3,8 @@ pandas
 matplotlib
 healpy
 astropy
+jax
+jaxlib
 scipy
 emcee
 pesummary

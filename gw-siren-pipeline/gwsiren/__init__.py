@@ -1,5 +1,6 @@
 from .event_data import EventDataPackage
 from .config import Config, load_config, CONFIG
+from .backends import get_xp, BackendNotAvailableError, logpdf_normal_xp, logsumexp_xp
 from .pipeline import (
     run_full_analysis,
     save_h0_samples_and_print_summary,
@@ -44,4 +45,8 @@ __all__ = [
     "run_global_mcmc",
     "process_global_mcmc_samples",
     "save_global_samples",
+    "get_xp",
+    "BackendNotAvailableError",
+    "logpdf_normal_xp",
+    "logsumexp_xp",
 ]

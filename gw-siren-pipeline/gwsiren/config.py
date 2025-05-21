@@ -11,6 +11,12 @@ except Exception:  # pragma: no cover - fallback if PyYAML missing
     _pyyaml = None
 
 
+@dataclass(frozen=True)
+class ComputationConfig:
+    """Configuration for computation settings."""
+    backend: str = "auto"  # Options: "auto", "numpy", "jax"
+
+
 def _minimal_yaml_load(text: str) -> dict:
     """Very small YAML loader supporting two-level mappings."""
     data: dict[str, dict[str, object]] = {}
@@ -179,6 +185,7 @@ class Config:
     mcmc: dict
     cosmology: dict
     fetcher: dict
+    computation: ComputationConfig = field(default_factory=ComputationConfig) # Added line
     multi_event_analysis: Optional[MultiEventAnalysisSettings] = None
 
 
@@ -206,13 +213,20 @@ def load_config(path: str | pathlib.Path | None = None) -> Config:
         raw = _pyyaml.safe_load(text)
     else:
         raw = _minimal_yaml_load(text)
-    me_raw = raw.get("multi_event_analysis")
+
+    comp_raw = raw.pop("computation", {})
+    computation_cfg = ComputationConfig(**comp_raw if isinstance(comp_raw, dict) else {})
+
+    me_raw = raw.get("multi_event_analysis") # Use .get() here, as it might not be present
+    me_cfg = None # Initialize me_cfg to None
     if me_raw is not None:
-        raw.pop("multi_event_analysis")
+        # Ensure me_raw is popped only if it exists, to avoid KeyError if it's missing
+        # and was already handled by .get() returning None.
+        # However, if it's present, it should be removed from `raw` before passing `**raw` to Config.
+        raw.pop("multi_event_analysis", None) # Remove if present, do nothing if not
         me_cfg = _parse_multi_event_config(me_raw)
-    else:
-        me_cfg = None
-    return Config(**raw, multi_event_analysis=me_cfg)
+    
+    return Config(**raw, computation=computation_cfg, multi_event_analysis=me_cfg)
 
 
 CONFIG = load_config()

@@ -27,6 +27,10 @@ fetcher:
   timeout:         30
   max_retries:     3
 
+# Computation settings
+computation:
+  backend: "auto" # Options: "auto", "numpy", "jax"
+
 # Example settings for combining multiple events
 multi_event_analysis:
   run_settings:

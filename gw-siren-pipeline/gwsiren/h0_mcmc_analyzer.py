@@ -1,18 +1,23 @@
 import numpy as np
 import sys
-from scipy.stats import norm
+# from scipy.stats import norm # Replaced by logpdf_normal_xp
 from numpy.polynomial.hermite import hermgauss
-from scipy.special import logsumexp
-from astropy.cosmology import FlatLambdaCDM
-from astropy import units as u
+# from scipy.special import logsumexp # Will be replaced by logsumexp_xp
+# from astropy.cosmology import FlatLambdaCDM # Removed
+# from astropy import units as u # Removed
 import emcee
 import logging
 import cProfile
 import pstats
 import io
-from gwsiren import CONFIG
+from gwsiren import CONFIG # Keep for default values, but not for backend selection in get_log_likelihood_h0
+from gwsiren.backends import get_xp, logpdf_normal_xp, logsumexp_xp 
 
 logger = logging.getLogger(__name__)
+
+# Module-level constants for memory management in NumPy backend path
+MEMORY_THRESHOLD_BYTES = 4 * (1024**3)  # 4 GB
+BYTES_PER_ELEMENT = 8  # for float64 (numpy.float64)
 
 # Default Cosmological Parameters for Likelihood
 DEFAULT_SIGMA_V_PEC = CONFIG.cosmology["sigma_v_pec"]  # km/s, peculiar velocity uncertainty
@@ -54,6 +59,9 @@ class H0LogLikelihood:
     """
     def __init__(
         self,
+        xp,  # Added
+        backend_name, # Added
+        # device_name, # Optional to store, but good to receive
         dL_gw_samples,
         host_galaxies_z,
         host_galaxies_mass_proxy,
@@ -65,29 +73,39 @@ class H0LogLikelihood:
         h0_max=DEFAULT_H0_PRIOR_MAX,
         alpha_min=DEFAULT_ALPHA_PRIOR_MIN,
         alpha_max=DEFAULT_ALPHA_PRIOR_MAX,
-        use_vectorized_likelihood=False,
+        use_vectorized_likelihood=False, # Keep for now
     ):
-        
-        if dL_gw_samples is None or len(dL_gw_samples) == 0:
+        self.xp = xp
+        self.backend_name = backend_name
+        # self.device_name = device_name
+
+        # Initial validation using NumPy as it's familiar and robust for this
+        if dL_gw_samples is None or len(np.asarray(dL_gw_samples)) == 0: # Use np for initial check
             raise ValueError("dL_gw_samples cannot be None or empty.")
-        if host_galaxies_z is None or len(host_galaxies_z) == 0:
+        if host_galaxies_z is None or len(np.asarray(host_galaxies_z)) == 0:
             raise ValueError("host_galaxies_z cannot be None or empty.")
-        if host_galaxies_mass_proxy is None or len(host_galaxies_mass_proxy) == 0:
+        if host_galaxies_mass_proxy is None or len(np.asarray(host_galaxies_mass_proxy)) == 0:
             raise ValueError("host_galaxies_mass_proxy cannot be None or empty.")
-        if host_galaxies_z_err is None or len(host_galaxies_z_err) == 0:
+        if host_galaxies_z_err is None or len(np.asarray(host_galaxies_z_err)) == 0:
             raise ValueError("host_galaxies_z_err cannot be None or empty.")
 
-        self.dL_gw_samples = np.asarray(dL_gw_samples)
-        # Ensure host_galaxies_z is a numpy array for broadcasting
-        self.z_values = np.asarray(host_galaxies_z)
-        self.mass_proxy_values = np.asarray(host_galaxies_mass_proxy, dtype=float)
-        self.z_err_values = np.asarray(host_galaxies_z_err, dtype=float)
-        if self.z_values.ndim == 0: # if it was a single scalar
-            self.z_values = np.array([self.z_values])
-        if self.mass_proxy_values.ndim == 0:
-            self.mass_proxy_values = np.array([self.mass_proxy_values])
-        if self.z_err_values.ndim == 0:
-            self.z_err_values = np.array([self.z_err_values])
+        # Convert to self.xp arrays after validation
+        self.dL_gw_samples = self.xp.asarray(dL_gw_samples)
+        _z_values_np = np.asarray(host_galaxies_z) # Use np for initial manipulation if needed
+        _mass_proxy_values_np = np.asarray(host_galaxies_mass_proxy, dtype=float)
+        _z_err_values_np = np.asarray(host_galaxies_z_err, dtype=float)
+
+        if _z_values_np.ndim == 0: # if it was a single scalar
+            _z_values_np = np.array([_z_values_np])
+        if _mass_proxy_values_np.ndim == 0:
+            _mass_proxy_values_np = np.array([_mass_proxy_values_np])
+        if _z_err_values_np.ndim == 0:
+            _z_err_values_np = np.array([_z_err_values_np])
+        
+        self.z_values = self.xp.asarray(_z_values_np)
+        self.mass_proxy_values = self.xp.asarray(_mass_proxy_values_np)
+        self.z_err_values = self.xp.asarray(_z_err_values_np)
+
         if len(self.mass_proxy_values) != len(self.z_values):
             raise ValueError("host_galaxies_mass_proxy and host_galaxies_z must have the same length")
         if len(self.z_err_values) != len(self.z_values):
@@ -102,31 +120,72 @@ class H0LogLikelihood:
         self.alpha_min = alpha_min
         self.alpha_max = alpha_max
 
-        # Pre-create a base cosmology object to avoid repeated construction
-        # during likelihood evaluations. Using ``H0=1`` allows scaling
-        # distances for arbitrary ``H0`` values without recomputing the
-        # cosmology internals.
-        self._base_cosmo = FlatLambdaCDM(
-            H0=1.0 * u.km / u.s / u.Mpc, Om0=self.omega_m_val
-        )
+        # self._base_cosmo = FlatLambdaCDM( # Removed
+        #     H0=1.0 * u.km / u.s / u.Mpc, Om0=self.omega_m_val
+        # )
 
         self._n_quad_points = 5
-        self._quad_nodes, self._quad_weights = hermgauss(self._n_quad_points)
+        _quad_nodes_np, _quad_weights_np = hermgauss(self._n_quad_points) # Still use numpy for this
+        self._quad_nodes = self.xp.asarray(_quad_nodes_np) # Then convert
+        self._quad_weights = self.xp.asarray(_quad_weights_np) # Then convert
 
-    def _lum_dist_model(self, z, H0_val):
-        """Compute luminosity distance for ``z`` and ``H0_val``.
+        # Conditionally JIT compile __call__ if using JAX
+        if self.backend_name == "jax":
+            try:
+                import jax
+                # JIT compile the __call__ method.
+                # JAX will treat 'self' as a static argument by default when JITting a method.
+                # This means that the attributes of 'self' that are JAX arrays will be traced as
+                # dynamic inputs, while Python primitive attributes of 'self' might be treated as static.
+                # This is generally the desired behavior here.
+                # self._original_call = self.__call__ # Optional: keep a reference for debugging
+                self.__call__ = jax.jit(self.__call__)
+                logger.debug(f"H0LogLikelihood.__call__ method has been JIT-compiled for event processing with JAX.")
+            except ImportError:
+                # This case should ideally be caught by get_xp, but as a fallback:
+                logger.error("JAX backend was selected, but JAX module could not be imported for JIT. Likelihood will not be JITted.")
+            except Exception as e:
+                logger.error(f"Error during JAX JIT compilation of __call__: {e}")
+                # Proceed with non-JITted version for JAX if JIT fails
+                logger.warning("Proceeding with non-JITted JAX likelihood due to JIT compilation error.")
 
-        This method reuses a pre-created cosmology instance for efficiency.
 
-        Args:
-            z: Redshift value(s).
-            H0_val: Hubble constant value.
+    def _scalar_comoving_distance_integral(self, z_scalar, N_trapz=200):
+        """Computes integral(dz / E(z)) for a single scalar z_scalar using self.xp.trapz."""
+        if z_scalar < 1e-9: # Threshold for being effectively zero
+            return 0.0
+        
+        # z_steps must be generated by self.xp for self.xp.trapz
+        z_steps = self.xp.linspace(0.0, z_scalar, N_trapz) 
+        one_plus_z_steps = 1.0 + z_steps
+        omega_m_val_f = self.xp.asarray(self.omega_m_val, dtype=self.xp.float64) # Ensure float for JAX
+        
+        Ez_sq = omega_m_val_f * (one_plus_z_steps**3) + (1.0 - omega_m_val_f)
+        # Ensure Ez_sq is positive before sqrt, for numerical stability.
+        Ez = self.xp.sqrt(self.xp.maximum(1e-18, Ez_sq)) 
+        
+        # Avoid division by zero if any Ez element is zero
+        integrand = 1.0 / self.xp.maximum(1e-18, Ez)
+        
+        integral = self.xp.trapz(integrand, z_steps)
+        return integral
 
-        Returns:
-            Luminosity distance in Mpc units.
-        """
-        base_distance = self._base_cosmo.luminosity_distance(z).value
-        return base_distance / H0_val
+    def _lum_dist_model(self, z_values, H0_val, N_trapz=200):
+        """Compute luminosity distance for z_values (array or scalar) and H0_val."""
+        is_scalar_input = (self.xp.asarray(z_values).ndim == 0)
+        z_input_arr = self.xp.atleast_1d(z_values)
+
+        if H0_val < 1e-9: # Avoid division by zero for H0
+            return self.xp.full_like(z_input_arr, self.xp.inf, dtype=self.xp.float64)
+
+        dc_integrals_list = [self._scalar_comoving_distance_integral(z_val, N_trapz) for z_val in z_input_arr]
+        dc_integrals = self.xp.asarray(dc_integrals_list, dtype=self.xp.float64)
+
+        lum_dist = (self.c_val / H0_val) * (1.0 + z_input_arr) * dc_integrals
+        
+        if is_scalar_input and lum_dist.ndim > 0: # Ensure output matches input shape
+            return lum_dist[0]
+        return lum_dist
 
     def __call__(self, theta):
         H0 = theta[0]
@@ -134,26 +193,26 @@ class H0LogLikelihood:
 
         if not (self.h0_min <= H0 <= self.h0_max):
             # logger.debug(f"H0 = {H0} is outside prior range ({self.h0_min}, {self.h0_max}). Returning -inf.")
-            return -np.inf
+            return -self.xp.inf
 
         try: 
-            model_d_for_hosts = self._lum_dist_model(self.z_values, H0)
+            model_d_for_hosts = self._lum_dist_model(self.z_values, H0) # self.z_values is now xp array
             # logger.debug(f"model_d_for_hosts (first 5 if available): {model_d_for_hosts[:min(5, len(model_d_for_hosts))]}") 
-            if np.any(~np.isfinite(model_d_for_hosts)): 
-                # logger.debug(f"Non-finite values in model_d_for_hosts for H0 = {H0}. Example: {model_d_for_hosts[~np.isfinite(model_d_for_hosts)][:min(5, len(model_d_for_hosts[~np.isfinite(model_d_for_hosts)]))]}") 
-                return -np.inf 
+            if self.xp.any(~self.xp.isfinite(model_d_for_hosts)): 
+                # logger.debug(f"Non-finite values in model_d_for_hosts for H0 = {H0}. Example: {model_d_for_hosts[~self.xp.isfinite(model_d_for_hosts)][:min(5, len(model_d_for_hosts[~self.xp.isfinite(model_d_for_hosts)]))]}") 
+                return -self.xp.inf 
         except Exception as e: 
             # logger.debug(f"EXCEPTION in _lum_dist_model for H0 = {H0}: {e}") 
-            return -np.inf 
+            return -self.xp.inf 
         
         sigma_d_val_for_hosts = (model_d_for_hosts / self.c_val) * self.sigma_v
-        sigma_d_val_for_hosts = np.maximum(sigma_d_val_for_hosts, 1e-9) 
+        sigma_d_val_for_hosts = self.xp.maximum(sigma_d_val_for_hosts, 1e-9) 
         # logger.debug(f"sigma_d_val_for_hosts (first 5 if available): {sigma_d_val_for_hosts[:min(5, len(sigma_d_val_for_hosts))]}") 
-        if np.any(~np.isfinite(sigma_d_val_for_hosts)): 
+        if self.xp.any(~self.xp.isfinite(sigma_d_val_for_hosts)): 
             # logger.debug(f"Non-finite values in sigma_d_val_for_hosts for H0 = {H0}.") 
-            return -np.inf
+            return -self.xp.inf
 
-        log_sum_over_gw_samples = np.array([-np.inf]) # Placeholder for now
+        log_sum_over_gw_samples = self.xp.array([-self.xp.inf]) # Placeholder for now
 
         if self.use_vectorized_likelihood:
             # --- Fully Vectorized Alternative ---
@@ -163,43 +222,46 @@ class H0LogLikelihood:
                 # self.dL_gw_samples: (N_samples,) -> (N_samples, 1)
                 # model_d_for_hosts: (N_hosts,) -> (1, N_hosts)
                 # sigma_d_val_for_hosts: (N_hosts,) -> (1, N_hosts)
-                log_pdf_values_full = norm.logpdf(
-                    self.dL_gw_samples[:, np.newaxis],
-                    loc=model_d_for_hosts[np.newaxis, :],
-                    scale=sigma_d_val_for_hosts[np.newaxis, :]
+                log_pdf_values_full = logpdf_normal_xp(
+                    self.xp,
+                    self.dL_gw_samples[:, self.xp.newaxis],
+                    loc=model_d_for_hosts[self.xp.newaxis, :],
+                    scale=sigma_d_val_for_hosts[self.xp.newaxis, :]
                 ) # Shape: (N_samples, N_hosts)
             except Exception as e:
-                # logger.debug(f"EXCEPTION in norm.logpdf (vectorized) for H0 = {H0}: {e}")
+                # logger.debug(f"EXCEPTION in logpdf_normal_xp (vectorized) for H0 = {H0}: {e}")
                 # If the entire logpdf calculation fails, it likely means a broad issue
                 # (e.g. H0 way off, leading to bad model_d_for_hosts for ALL hosts)
-                # In this case, returning -np.inf for the whole likelihood is appropriate.
-                return -np.inf
+                # In this case, returning -self.xp.inf for the whole likelihood is appropriate.
+                return -self.xp.inf
 
-            # Handle potential NaNs by converting them to -np.inf.
-            # This allows logaddexp.reduce to correctly ignore them unless an entire column is -np.inf.
-            log_pdf_values_full[np.isnan(log_pdf_values_full)] = -np.inf
+            # Handle potential NaNs by converting them to -self.xp.inf.
+            # This allows logaddexp.reduce to correctly ignore them unless an entire column is -self.xp.inf.
+            log_pdf_values_full = self.xp.where(self.xp.isnan(log_pdf_values_full), -self.xp.inf, log_pdf_values_full)
 
-            # Check if any galaxy (column) resulted in all -np.inf values for its log_pdf terms.
+
+            # Check if any galaxy (column) resulted in all -self.xp.inf values for its log_pdf terms.
             # This can happen if a specific galaxy's model_d or sigma_d was problematic.
-            # all_inf_columns = np.all(log_pdf_values_full == -np.inf, axis=0)
+            # all_inf_columns = self.xp.all(log_pdf_values_full == -self.xp.inf, axis=0)
 
-            log_sum_over_gw_samples = np.logaddexp.reduce(log_pdf_values_full, axis=0) - np.log(len(self.dL_gw_samples))
+            # Use the new logsumexp_xp helper function
+            log_sum_over_gw_samples = logsumexp_xp(self.xp, log_pdf_values_full, axis=0) - self.xp.log(self.xp.array(len(self.dL_gw_samples), dtype=self.xp.float64))
             
-            # After reduction, if any element in log_sum_over_gw_samples is -np.inf 
-            # (e.g., because its corresponding column in log_pdf_values_full was all -np.inf, 
-            # or because logaddexp.reduce itself resulted in -inf due to underflow with very small numbers),
+            # After reduction, if any element in log_sum_over_gw_samples is -self.xp.inf 
+            # (e.g., because its corresponding column in log_pdf_values_full was all -self.xp.inf, 
+            # or because logaddexp.reduce itself resulted in -self.xp.inf due to underflow with very small numbers),
             # it will correctly propagate.
             # No specific check for all_inf_columns is strictly needed here because logaddexp.reduce handles it.
             
-            # logger.debug(f"log_sum_over_gw_samples (vectorized) shape: {log_sum_over_gw_samples.shape}, any non-finite: {np.any(~np.isfinite(log_sum_over_gw_samples))}")
+            # logger.debug(f"log_sum_over_gw_samples (vectorized) shape: {log_sum_over_gw_samples.shape}, any non-finite: {self.xp.any(~self.xp.isfinite(log_sum_over_gw_samples))}")
             # Example: Check first 5 values if problematic
-            if np.any(~np.isfinite(log_sum_over_gw_samples)):
-                # logger.debug(f"  Non-finite log_sum_over_gw_samples (vectorized): {log_sum_over_gw_samples[~np.isfinite(log_sum_over_gw_samples)][:5]}")
-                return -np.inf
+            if self.xp.any(~self.xp.isfinite(log_sum_over_gw_samples)):
+                # logger.debug(f"  Non-finite log_sum_over_gw_samples (vectorized): {log_sum_over_gw_samples[~self.xp.isfinite(log_sum_over_gw_samples)][:5]}")
+                return -self.xp.inf
 
         else:
             # --- Memory-Efficient Loop with Redshift Marginalization ---
-            log_P_data_H0_zi_terms = np.zeros(len(self.z_values))
+            log_P_data_H0_zi_terms = self.xp.zeros(len(self.z_values))
             for i in range(len(self.z_values)):
                 mu_z = self.z_values[i]
                 sigma_z = self.z_err_values[i]
@@ -208,78 +270,84 @@ class H0LogLikelihood:
                     current_model_d = model_d_for_hosts[i]
                     current_sigma_d = sigma_d_val_for_hosts[i]
                     try:
-                        log_pdf_for_one_galaxy = norm.logpdf(
+                        log_pdf_for_one_galaxy = logpdf_normal_xp(
+                            self.xp,
                             self.dL_gw_samples,
                             loc=current_model_d,
                             scale=current_sigma_d,
                         )
                     except Exception:
-                        log_pdf_for_one_galaxy = np.full(len(self.dL_gw_samples), -np.inf)
+                        log_pdf_for_one_galaxy = self.xp.full(len(self.dL_gw_samples), -self.xp.inf)
 
-                    if np.any(~np.isfinite(log_pdf_for_one_galaxy)):
-                        log_P_data_H0_zi_terms[i] = -np.inf
+                    if self.xp.any(~self.xp.isfinite(log_pdf_for_one_galaxy)):
+                        log_P_data_H0_zi_terms = log_P_data_H0_zi_terms.at[i].set(-self.xp.inf) # JAX way to update array element
                     else:
-                        log_P_data_H0_zi_terms[i] = (
-                            np.logaddexp.reduce(log_pdf_for_one_galaxy)
-                            - np.log(len(self.dL_gw_samples))
-                        )
+                        reduced_log_pdf = logsumexp_xp(self.xp, log_pdf_for_one_galaxy)
+                        term_val = reduced_log_pdf - self.xp.log(self.xp.array(len(self.dL_gw_samples), dtype=self.xp.float64))
+                        log_P_data_H0_zi_terms = log_P_data_H0_zi_terms.at[i].set(term_val)
                     continue
 
-                integrated_prob = 0.0
-                for node, weight in zip(self._quad_nodes, self._quad_weights):
-                    z_j = mu_z + np.sqrt(2.0) * sigma_z * node
-                    if z_j <= 0:
+                integrated_prob = 0.0 # This is a scalar, can remain float
+                # self._quad_nodes and self._quad_weights are now self.xp arrays
+                for node, weight in zip(self._quad_nodes, self._quad_weights): # Iteration fine for small n_quad_points
+                    z_j = mu_z + self.xp.sqrt(2.0) * sigma_z * node
+                    if z_j <= 0: # Scalar comparison
                         continue
-                    model_d = self._lum_dist_model(z_j, H0)
-                    sigma_d = max((model_d / self.c_val) * self.sigma_v, 1e-9)
+                    model_d = self._lum_dist_model(z_j, H0) # z_j is xp array if mu_z, sigma_z, node are.
+                    sigma_d = self.xp.maximum((model_d / self.c_val) * self.sigma_v, 1e-9)
                     try:
-                        log_pdf = norm.logpdf(
-                            self.dL_gw_samples,
-                            loc=model_d,
-                            scale=sigma_d,
+                        log_pdf = logpdf_normal_xp(
+                            self.xp,
+                            self.dL_gw_samples, # xp array
+                            loc=model_d,      # xp array or scalar
+                            scale=sigma_d,    # xp array or scalar
                         )
                     except Exception:
                         continue
-                    if np.any(~np.isfinite(log_pdf)):
+                    if self.xp.any(~self.xp.isfinite(log_pdf)):
                         continue
-                    P_event = np.exp(logsumexp(log_pdf) - np.log(len(self.dL_gw_samples)))
-                    integrated_prob += (weight / np.sqrt(np.pi)) * P_event
+                    
+                    current_logsumexp = logsumexp_xp(self.xp, log_pdf)
+                    P_event = self.xp.exp(current_logsumexp - self.xp.log(self.xp.array(len(self.dL_gw_samples),dtype=self.xp.float64)))
+                    integrated_prob += (weight / self.xp.sqrt(self.xp.pi)) * P_event # weight and P_event are xp arrays/scalars
 
-                if integrated_prob > 0:
-                    log_P_data_H0_zi_terms[i] = np.log(integrated_prob)
+                if integrated_prob > 0: # Scalar comparison
+                    log_P_data_H0_zi_terms = log_P_data_H0_zi_terms.at[i].set(self.xp.log(integrated_prob))
                 else:
-                    log_P_data_H0_zi_terms[i] = -np.inf
-
+                    log_P_data_H0_zi_terms = log_P_data_H0_zi_terms.at[i].set(-self.xp.inf)
+            
             log_sum_over_gw_samples = log_P_data_H0_zi_terms
-            # logger.debug(f"log_sum_over_gw_samples (iterative per galaxy) shape: {log_sum_over_gw_samples.shape}, any non-finite: {np.any(~np.isfinite(log_sum_over_gw_samples))}")
+            # logger.debug(f"log_sum_over_gw_samples (iterative per galaxy) shape: {log_sum_over_gw_samples.shape}, any non-finite: {self.xp.any(~self.xp.isfinite(log_sum_over_gw_samples))}")
 
         alpha = theta[1]
         if not (self.alpha_min <= alpha <= self.alpha_max):
-            return -np.inf
+            return -self.xp.inf
 
-        if np.isclose(alpha, 0.0):
-            weights = np.full(len(self.mass_proxy_values), 1.0 / len(self.mass_proxy_values))
+        if self.xp.isclose(alpha, 0.0):
+            weights = self.xp.full(len(self.mass_proxy_values), 1.0 / len(self.mass_proxy_values))
         else:
             powered = self.mass_proxy_values ** alpha
-            if np.any(powered <= 0) or not np.all(np.isfinite(powered)):
-                return -np.inf
+            if self.xp.any(powered <= 0) or not self.xp.all(self.xp.isfinite(powered)):
+                return -self.xp.inf
             denom = powered.sum()
-            if not np.isfinite(denom) or denom <= 0:
-                return -np.inf
+            if not self.xp.isfinite(denom) or denom <= 0:
+                return -self.xp.inf
             weights = powered / denom
 
         valid_mask = weights > 0
-        if not np.any(valid_mask):
-            return -np.inf
+        if not self.xp.any(valid_mask):
+            return -self.xp.inf
+        
+        terms_to_sum = self.xp.log(weights[valid_mask]) + log_sum_over_gw_samples[valid_mask]
+        total_log_likelihood = logsumexp_xp(self.xp, terms_to_sum)
 
-        total_log_likelihood = logsumexp(np.log(weights[valid_mask]) + log_sum_over_gw_samples[valid_mask])
-
-        if not np.isfinite(total_log_likelihood):
-            return -np.inf
+        if not self.xp.isfinite(total_log_likelihood):
+            return -self.xp.inf
 
         return total_log_likelihood
 
 def get_log_likelihood_h0(
+    requested_backend_str: str, # Added: explicit backend request
     dL_gw_samples,
     host_galaxies_z,
     host_galaxies_mass_proxy,
@@ -291,13 +359,14 @@ def get_log_likelihood_h0(
     h0_max=DEFAULT_H0_PRIOR_MAX,
     alpha_min=DEFAULT_ALPHA_PRIOR_MIN,
     alpha_max=DEFAULT_ALPHA_PRIOR_MAX,
+    # use_vectorized_likelihood is determined below based on backend_name
 ):
     """
-    Returns an instance of the H0LogLikelihood class, dynamically choosing
-    between looped and vectorized likelihood calculation based on data size.
-
+    Returns an instance of the H0LogLikelihood class, configured for the specified backend.
+    
     Args:
-        dL_gw_samples (np.array): Luminosity distance samples from GW event (N_samples,).
+        requested_backend_str (str): The backend to use ("auto", "numpy", "jax").
+        dL_gw_samples (np.array): Luminosity distance samples...
         host_galaxies_z (np.array): Redshifts of candidate host galaxies (N_hosts,).
         host_galaxies_mass_proxy (np.array): Positive mass proxy values for the galaxies.
         host_galaxies_z_err (np.array): Redshift uncertainties for the galaxies.
@@ -312,37 +381,49 @@ def get_log_likelihood_h0(
     Returns:
         H0LogLikelihood: An instance of the H0LogLikelihood class.
     """
-    # Dynamic switch for vectorization based on memory
-    # 4 GB threshold = 4 * 1024^3 bytes
-    # float64 takes 8 bytes
-    MEMORY_THRESHOLD_BYTES = 4 * (1024**3)
-    BYTES_PER_ELEMENT = 8 # for float64
-    max_elements_for_vectorization = MEMORY_THRESHOLD_BYTES / BYTES_PER_ELEMENT
+    # At the beginning of the function:
+    xp_module, backend_name, device_name = get_xp(requested_backend_str) # Use the passed string
 
-    n_gw_samples = len(dL_gw_samples)
+    # Ensure dL_gw_samples is array-like for len() before passing to H0LogLikelihood
+    # which will convert it to xp_module.asarray()
+    # H0LogLikelihood's __init__ does initial checks with np.asarray for robustness.
+    n_gw_samples = len(np.asarray(dL_gw_samples))
+    
     # Ensure host_galaxies_z is treated as an array for len()
-    _host_galaxies_z = np.asarray(host_galaxies_z)
-    if _host_galaxies_z.ndim == 0:
+    _host_galaxies_z_np_for_len = np.asarray(host_galaxies_z)
+    if _host_galaxies_z_np_for_len.ndim == 0:
         n_hosts = 1
     else:
-        n_hosts = len(_host_galaxies_z)
+        n_hosts = len(_host_galaxies_z_np_for_len)
+
+    if backend_name == "jax":
+        should_use_vectorized = True # JAX path will be inherently vectorized/optimized
+        logger.info(
+            f"Using JAX backend (on {device_name}). Will use JAX-optimized likelihood path."
+        )
+    else: # numpy backend
+        # Existing memory-based decision for NumPy
+        # n_gw_samples, n_hosts are calculated above this block in the provided snippet
+        current_elements = n_gw_samples * n_hosts
+        # MEMORY_THRESHOLD_BYTES and BYTES_PER_ELEMENT are now module-level constants
+        max_elements_for_vectorization = MEMORY_THRESHOLD_BYTES / BYTES_PER_ELEMENT
+        should_use_vectorized = current_elements <= max_elements_for_vectorization
         
-    current_elements = n_gw_samples * n_hosts
-
-    should_use_vectorized = current_elements <= max_elements_for_vectorization
-
-    if should_use_vectorized:
-        logger.info(
-            f"Using VECTORIZED likelihood: N_samples ({n_gw_samples}) * N_hosts ({n_hosts}) = {current_elements} elements. "
-            f"Threshold: {max_elements_for_vectorization:.0f} elements ({MEMORY_THRESHOLD_BYTES / (1024**3):.0f} GB)."
-        )
-    else:
-        logger.info(
-            f"Using LOOPED likelihood (memory efficient): N_samples ({n_gw_samples}) * N_hosts ({n_hosts}) = {current_elements} elements. "
-            f"Exceeds threshold of {max_elements_for_vectorization:.0f} elements ({MEMORY_THRESHOLD_BYTES / (1024**3):.0f} GB)."
-        )
+        if should_use_vectorized:
+            logger.info(
+                f"Using NumPy backend, VECTORIZED likelihood: N_samples ({n_gw_samples}) * N_hosts ({n_hosts}) = {current_elements} elements. "
+                f"Threshold: {max_elements_for_vectorization:.0f} elements ({MEMORY_THRESHOLD_BYTES / (1024**3):.0f} GB)."
+            )
+        else:
+            logger.info(
+                f"Using NumPy backend, LOOPED likelihood (memory efficient): N_samples ({n_gw_samples}) * N_hosts ({n_hosts}) = {current_elements} elements. "
+                f"Exceeds threshold of {max_elements_for_vectorization:.0f} elements ({MEMORY_THRESHOLD_BYTES / (1024**3):.0f} GB)."
+            )
 
     return H0LogLikelihood(
+        xp_module, # Pass xp
+        backend_name, # Pass backend_name
+        # device_name, # Pass device_name (optional to store in H0LogLikelihood)
         dL_gw_samples,
         host_galaxies_z,
         host_galaxies_mass_proxy,
@@ -357,33 +438,11 @@ def get_log_likelihood_h0(
         use_vectorized_likelihood=should_use_vectorized,
     )
 
-def get_log_likelihood_h0_vectorized(
-    dL_gw_samples,
-    host_galaxies_z,
-    host_galaxies_mass_proxy,
-    host_galaxies_z_err,
-    sigma_v=DEFAULT_SIGMA_V_PEC,
-    c_val=DEFAULT_C_LIGHT,
-    omega_m_val=DEFAULT_OMEGA_M,
-    h0_min=DEFAULT_H0_PRIOR_MIN,
-    h0_max=DEFAULT_H0_PRIOR_MAX,
-    alpha_min=DEFAULT_ALPHA_PRIOR_MIN,
-    alpha_max=DEFAULT_ALPHA_PRIOR_MAX,
-):
-    return H0LogLikelihood(
-        dL_gw_samples,
-        host_galaxies_z,
-        host_galaxies_mass_proxy,
-        host_galaxies_z_err,
-        sigma_v,
-        c_val,
-        omega_m_val,
-        h0_min,
-        h0_max,
-        alpha_min,
-        alpha_max,
-        use_vectorized_likelihood=True,
-    )
+# It might be useful to keep get_log_likelihood_h0_vectorized for specific testing,
+# but ensure it also gets the xp context. Or remove if get_log_likelihood_h0 covers all.
+# For now, let's assume it's removed or refactored if kept.
+# For this subtask, I will remove it as get_log_likelihood_h0 now handles backend.
+# def get_log_likelihood_h0_vectorized(...): -> This function is removed.
 
 def run_mcmc_h0(
     log_likelihood_func,
@@ -514,237 +573,250 @@ if __name__ == '__main__':
 
     # 1. Test get_log_likelihood_h0
     logger.info("\nTest 1: Getting log likelihood function...")
+    # Determine backend for testing - e.g. use "auto" or a specific one like "numpy"
+    test_backend_choice = "auto" # Or "numpy", "jax"
+    # If using "auto", it might pick JAX if available. For more controlled tests, specify "numpy" or "jax".
+    # test_backend_choice = CONFIG.computation.backend # Or read from config for test consistency
+    
     try:
-        log_like_func = get_log_likelihood_h0(mock_dL_gw, mock_host_zs) # Now uses dynamic switching
+        # Ensure mock data for mass_proxy and z_err are provided
+        mock_mass_proxy = np.random.rand(len(mock_host_zs)) * 100 + 1 # Example positive values
+        mock_z_err = np.random.rand(len(mock_host_zs)) * 0.01 # Example small errors
+
+        log_like_func = get_log_likelihood_h0(
+            test_backend_choice, # Pass the chosen backend string for testing
+            mock_dL_gw, 
+            mock_host_zs,
+            mock_mass_proxy,
+            mock_z_err
+        )
         # Test the likelihood function with some H0 values
         h0_test_values = [60.0, 70.0, 80.0]
-        logger.info(f"  Log likelihood values for H0={h0_test_values}:")
+        logger.info(f"  Log likelihood values for H0={h0_test_values} using backend '{log_like_func.backend_name}':")
         for h0_val in h0_test_values:
-            ll = log_like_func([h0_val])
-            logger.info(f"    H0 = {h0_val:.1f}: logL = {ll:.2f}")
-            assert np.isfinite(ll), f"LogL not finite for H0={h0_val}"
+            # Assuming alpha is the second parameter, provide a default like 0.0
+            ll = log_like_func([h0_val, 0.0]) 
+            logger.info(f"    H0 = {h0_val:.1f}, alpha = 0.0: logL = {ll:.2f}")
+            # Using xp.isfinite from the likelihood's own backend context
+            assert log_like_func.xp.isfinite(ll), f"LogL not finite for H0={h0_val}"
         logger.info("  Log likelihood function seems operational.")
 
         # Test prior boundaries
-        ll_low = log_like_func([DEFAULT_H0_PRIOR_MIN - 1])
-        assert ll_low == -np.inf, "Prior min boundary failed"
-        ll_high = log_like_func([DEFAULT_H0_PRIOR_MAX + 1])
-        assert ll_high == -np.inf, "Prior max boundary failed"
+        ll_low = log_like_func([DEFAULT_H0_PRIOR_MIN - 1, 0.0])
+        assert ll_low == -log_like_func.xp.inf, "Prior min boundary failed"
+        ll_high = log_like_func([DEFAULT_H0_PRIOR_MAX + 1, 0.0])
+        assert ll_high == -log_like_func.xp.inf, "Prior max boundary failed"
         logger.info(f"  Prior boundaries (H0_min={DEFAULT_H0_PRIOR_MIN}, H0_max={DEFAULT_H0_PRIOR_MAX}) correctly applied.")
 
-        # Test with explicitly vectorized version for comparison if needed, or rely on dynamic one
-        log_like_func_explicit_vec = get_log_likelihood_h0_vectorized(mock_dL_gw, mock_host_zs)
-        ll_vec_explicit = log_like_func_explicit_vec([70.0])
-        ll_dynamic = log_like_func([70.0]) # log_like_func should be vectorized for mock data size
-        assert np.isclose(ll_vec_explicit, ll_dynamic), \
-            f"Explicitly vectorized ({ll_vec_explicit}) and dynamically chosen vectorized ({ll_dynamic}) paths should give same result"
-        logger.info(f"  Explicitly vectorized path gives logL={ll_vec_explicit:.2f}, Dynamically chosen path gives logL={ll_dynamic:.2f} (vectorized expected for this data size)")
+        ll_dynamic = log_like_func([70.0, 0.0]) # Pass alpha too
+        logger.info(f"  Dynamically chosen path (backend: {log_like_func.backend_name if hasattr(log_like_func, 'backend_name') else 'N/A'}) gives logL={ll_dynamic:.2f}")
+
 
     except ValueError as ve:
-        logger.error(f"  Error in Test 1 (get_log_likelihood_h0): {ve}")
+        logger.error(f"  Error in Test 1 (get_log_likelihood_h0): {ve}", exc_info=True)
     except Exception as e:
-        logger.exception(f"  Unexpected error in Test 1 (get_log_likelihood_h0): {e}")
+        logger.exception(f"  Unexpected error in Test 1 (get_log_likelihood_h0): {e}", exc_info=True)
 
     # 2. Test run_mcmc_h0 and process_mcmc_samples
     logger.info("\nTest 2: Running MCMC and processing samples...")
     # Reduce steps for faster testing
-    test_mcmc_steps = 200 
+    test_mcmc_steps = 200
     test_mcmc_burnin = 50
     test_mcmc_walkers = 8 # Fewer walkers for test
 
-    if 'log_like_func' in locals(): # Proceed if likelihood function was created
-        sampler = run_mcmc_h0(
-            log_like_func, 
-            mock_event,
-            n_walkers=test_mcmc_walkers,
-            n_steps=test_mcmc_steps
-        )
+    # Get the backend once for the test script main section, if still needed outside get_log_likelihood_h0
+    # xp_test, backend_name_test, device_name_test = get_xp(test_backend_choice) 
+    # logger.info(f"--- Main test script using backend: {backend_name_test} on {device_name_test} for general tests ---")
 
-        if sampler:
-            h0_samples = process_mcmc_samples(
-                sampler, 
+
+    if 'log_like_func' in locals(): # Proceed if likelihood function was created
+        # log_like_func is already obtained using test_backend_choice
+        # try:
+            # log_like_func = get_log_likelihood_h0( # This would re-create it, not needed if already created above
+            #     test_backend_choice,
+            #     mock_dL_gw, 
+            #     mock_host_zs, 
+            #     mock_mass_proxy, 
+            #     mock_z_err
+            # )
+            # logger.info(f"  Log likelihood function re-obtained with backend: {log_like_func.backend_name if hasattr(log_like_func, 'backend_name') else 'N/A'}")
+
+        sampler = run_mcmc_h0(
+                log_like_func,
                 mock_event,
-                burnin=test_mcmc_burnin, 
-                thin_by=2 # Small thin factor for test
+                n_walkers=test_mcmc_walkers,
+                n_steps=test_mcmc_steps
             )
-            if h0_samples is not None and len(h0_samples) > 0:
-                logger.info(f"  Successfully ran MCMC and processed samples for {mock_event}.")
-                logger.info(f"  Number of H0 samples obtained: {len(h0_samples)}")
-                logger.info(f"  H0 mean: {np.mean(h0_samples):.2f}, H0 std: {np.std(h0_samples):.2f}")
-                # Expect H0 mean to be somewhat related to initial mean if likelihood is reasonable
-                # assert DEFAULT_MCMC_INITIAL_H0_MEAN - 3*DEFAULT_MCMC_INITIAL_H0_STD < np.mean(h0_samples) < DEFAULT_MCMC_INITIAL_H0_MEAN + 3*DEFAULT_MCMC_INITIAL_H0_STD
-            elif h0_samples is not None and len(h0_samples) == 0:
-                logger.warning("  MCMC processing resulted in zero samples. Check burn-in/thinning or chain length.")
+
+            if sampler:
+                # Process MCMC samples (this function remains largely numpy-based for now from emcee output)
+                h0_samples_processed = process_mcmc_samples(
+                    sampler,
+                    mock_event,
+                    burnin=test_mcmc_burnin,
+                    thin_by=2 # Small thin factor for test
+                )
+                if h0_samples_processed is not None and len(h0_samples_processed) > 0:
+                    logger.info(f"  Successfully ran MCMC and processed samples for {mock_event}.")
+                    logger.info(f"  Number of H0 samples obtained: {len(h0_samples_processed)}")
+                    # np.mean and np.std are fine here as h0_samples_processed is a NumPy array from emcee
+                    logger.info(f"  H0 mean: {np.mean(h0_samples_processed[:,0]):.2f}, H0 std: {np.std(h0_samples_processed[:,0]):.2f}")
+                    if h0_samples_processed.shape[1] > 1:
+                         logger.info(f"  Alpha mean: {np.mean(h0_samples_processed[:,1]):.2f}, Alpha std: {np.std(h0_samples_processed[:,1]):.2f}")
+
+                elif h0_samples_processed is not None and len(h0_samples_processed) == 0:
+                    logger.warning("  MCMC processing resulted in zero samples. Check burn-in/thinning or chain length.")
+                else:
+                    logger.error("  MCMC processing failed to return valid samples.")
             else:
-                logger.error("  MCMC processing failed to return valid samples.")
-        else:
-            logger.error("  MCMC run failed or returned no sampler. Cannot test processing.")
+                logger.error("  MCMC run failed or returned no sampler. Cannot test processing.")
+        except Exception as e_mcmc_test:
+            logger.exception(f"  Error during MCMC test setup or execution with new backend logic: {e_mcmc_test}")
+
     else:
-        logger.error("  Log likelihood function not available. Skipping MCMC run and processing tests.")
+        logger.error("  Log likelihood function (log_like_func) not available. Skipping MCMC run and processing tests.")
+
 
     # Test with problematic inputs for get_log_likelihood_h0
     logger.info("\nTest 3: Edge cases for get_log_likelihood_h0")
     try:
-        get_log_likelihood_h0(None, mock_host_zs)
+        get_log_likelihood_h0(None, mock_host_zs, np.ones_like(mock_host_zs), np.full_like(mock_host_zs, 0.001))
     except ValueError as e:
         logger.info(f"  Correctly caught error for None dL samples: {e}")
     try:
-        get_log_likelihood_h0(mock_dL_gw, [])
+        get_log_likelihood_h0(mock_dL_gw, [], [], [])
     except ValueError as e:
         logger.info(f"  Correctly caught error for empty host_zs: {e}")
 
-    # 4. Profiling Section
+    # 4. Profiling Section - This will need careful adaptation for xp
     logger.info("\nTest 4: Profiling the __call__ method...")
-    if 'log_like_func' in locals():
-        # Profile the original looped version
-        pr_loop = cProfile.Profile()
-        pr_loop.enable()
-        profile_likelihood_call(log_like_func, h0_test_values_for_profiling, n_calls=5)
-        pr_loop.disable()
+    if 'log_like_func' in locals() and hasattr(log_like_func, 'xp'):
         
-        s_loop = io.StringIO()
-        ps_loop = pstats.Stats(pr_loop, stream=s_loop).sort_stats('cumulative')
-        ps_loop.print_stats(30) # Print top 30 cumulative time consumers
-        logger.info("\n--- cProfile results for Looped Likelihood ---")
-        print(s_loop.getvalue())
-
-        # Profile the dynamically chosen version (expected to be vectorized for mock data)
-        # log_like_func_vectorized = get_log_likelihood_h0_vectorized(mock_dL_gw, mock_host_zs) # Keep this for explicit vectorization test
-        # For profiling, we rely on log_like_func which is now dynamic.
-        # To ensure we profile both paths, we might need to force one to be looped if mock data is small.
-        # For now, let's assume mock_dL_gw * mock_host_zs is small enough for vectorization.
-        # And we need an instance that is FORCED to be looped for comparison in profiling.
-
-        log_like_func_looped_for_profiling = H0LogLikelihood(
-            mock_dL_gw, mock_host_zs, 
-            use_vectorized_likelihood=False # Force loop for this profiling instance
-        )
-        log_like_func_vectorized_for_profiling = H0LogLikelihood(
-            mock_dL_gw, mock_host_zs,
-            use_vectorized_likelihood=True # Force vectorization for this profiling instance
-        )
-
-        logger.info("Profiling dynamically chosen (expected vectorized) likelihood path...")
-        pr_vec = cProfile.Profile()
-        pr_vec.enable()
-        profile_likelihood_call(log_like_func, h0_test_values_for_profiling, n_calls=5) # log_like_func is dynamic
-        pr_vec.disable()
-
-        s_vec = io.StringIO()
-        ps_vec = pstats.Stats(pr_vec, stream=s_vec).sort_stats('cumulative')
-        ps_vec.print_stats(30)
-        logger.info("\n--- cProfile results for Dynamically Chosen (expected Vectorized) Likelihood ---")
-        print(s_vec.getvalue())
-    else:
-        logger.error("  Log likelihood function not available. Skipping profiling.")
-
-    # 5. Timeit Benchmarking Section
-    logger.info("\nTest 5: Benchmarking with timeit...")
-    if 'log_like_func' in locals() and 'log_like_func_vectorized' in locals():
-        import timeit
+        # To profile both paths (numpy-looped, numpy-vectorized, jax), we need to ensure
+        # we can create instances of H0LogLikelihood with specific backends and vectorization modes.
         
-        # For timeit, we want to compare an explicitly looped vs explicitly vectorized (or dynamically vectorized)
-        # log_like_func is now dynamic. Let's create specific instances for timeit.
-        timeit_looped_instance = H0LogLikelihood(mock_dL_gw, mock_host_zs, use_vectorized_likelihood=False)
-        timeit_vectorized_instance = H0LogLikelihood(mock_dL_gw, mock_host_zs, use_vectorized_likelihood=True)
-        # Or use the dynamic one for vectorized, assuming it picks vectorization for mock data:
-        # timeit_vectorized_instance = get_log_likelihood_h0(mock_dL_gw, mock_host_zs)
-
-        n_timeit_runs = 100 # Number of times to execute the statement for timing
-        n_timeit_repeat = 5 # Number of times to repeat the timing trial
-
-        # Setup for timeit: make sure the objects are accessible
-        # We'll call the __call__ method on existing instances.
-        # The `glob` argument to timeit.repeat makes these available.
-        timeit_globals = {
-            "log_like_func_looped": timeit_looped_instance, 
-            "log_like_func_vec": timeit_vectorized_instance, 
-            "h0_test_val": [70.0] # A sample H0 value
-        }
-
-        logger.info(f"  Timing looped version ({n_timeit_runs} calls, {n_timeit_repeat} repeats)...")
-        looped_times = timeit.repeat(
-            "log_like_func_looped(h0_test_val)", 
-            globals=timeit_globals,
-            number=n_timeit_runs, 
-            repeat=n_timeit_repeat
+        # Numpy Looped
+        xp_numpy, _, _ = get_xp("numpy")
+        log_like_numpy_looped = H0LogLikelihood(
+            xp_numpy, "numpy", mock_dL_gw, mock_host_zs, np.ones_like(mock_host_zs), np.full_like(mock_host_zs, 0.001),
+            use_vectorized_likelihood=False
         )
-        min_looped_time = min(looped_times) / n_timeit_runs
-        logger.info(f"    Min time per call (looped): {min_looped_time*1e6:.2f} microseconds")
+        logger.info("Profiling NumPy Looped Likelihood...")
+        pr_np_loop = cProfile.Profile()
+        pr_np_loop.enable()
+        profile_likelihood_call(log_like_numpy_looped, h0_test_values_for_profiling, n_calls=5)
+        pr_np_loop.disable()
+        s_np_loop = io.StringIO()
+        pstats.Stats(pr_np_loop, stream=s_np_loop).sort_stats('cumulative').print_stats(30)
+        logger.info("\n--- cProfile results for NumPy Looped Likelihood ---")
+        print(s_np_loop.getvalue())
 
-        logger.info(f"  Timing vectorized version ({n_timeit_runs} calls, {n_timeit_repeat} repeats)...")
-        vectorized_times = timeit.repeat(
-            "log_like_func_vec(h0_test_val)", 
-            globals=timeit_globals,
-            number=n_timeit_runs, 
-            repeat=n_timeit_repeat
+        # Numpy Vectorized
+        log_like_numpy_vec = H0LogLikelihood(
+            xp_numpy, "numpy", mock_dL_gw, mock_host_zs, np.ones_like(mock_host_zs), np.full_like(mock_host_zs, 0.001),
+            use_vectorized_likelihood=True # This should be chosen if data size allows by get_log_likelihood_h0
         )
-        min_vectorized_time = min(vectorized_times) / n_timeit_runs
-        logger.info(f"    Min time per call (vectorized): {min_vectorized_time*1e6:.2f} microseconds")
-        
-        if min_vectorized_time < min_looped_time:
-            logger.info(f"    Vectorized is approx {min_looped_time/min_vectorized_time:.2f}x faster.")
-        else:
-            logger.info(f"    Looped is approx {min_vectorized_time/min_looped_time:.2f}x faster (or similar speed).")
+        logger.info("Profiling NumPy Vectorized Likelihood...")
+        pr_np_vec = cProfile.Profile()
+        pr_np_vec.enable()
+        profile_likelihood_call(log_like_numpy_vec, h0_test_values_for_profiling, n_calls=5)
+        pr_np_vec.disable()
+        s_np_vec = io.StringIO()
+        pstats.Stats(pr_np_vec, stream=s_np_vec).sort_stats('cumulative').print_stats(30)
+        logger.info("\n--- cProfile results for NumPy Vectorized Likelihood ---")
+        print(s_np_vec.getvalue())
+
+        # JAX (if available)
+        try:
+            xp_jax, _, _ = get_xp("jax")
+            # For JAX, use_vectorized_likelihood is effectively True
+            log_like_jax = H0LogLikelihood(
+                xp_jax, "jax", mock_dL_gw, mock_host_zs, np.ones_like(mock_host_zs), np.full_like(mock_host_zs, 0.001),
+                use_vectorized_likelihood=True 
+            )
+            logger.info("Profiling JAX Likelihood...")
+            # JAX specific: compile call for fair comparison if needed
+            # _ = log_like_jax([h0_test_values_for_profiling[0]]).block_until_ready() # JIT compile
+            
+            pr_jax = cProfile.Profile()
+            pr_jax.enable()
+            profile_likelihood_call(log_like_jax, h0_test_values_for_profiling, n_calls=5)
+            # for h0_val in h0_test_values_for_profiling: # Manual loop for block_until_ready
+            #    for _ in range(5):
+            #        _ = log_like_jax([h0_val]).block_until_ready()
+
+            pr_jax.disable()
+            s_jax = io.StringIO()
+            pstats.Stats(pr_jax, stream=s_jax).sort_stats('cumulative').print_stats(30)
+            logger.info("\n--- cProfile results for JAX Likelihood ---")
+            print(s_jax.getvalue())
+        except Exception as e_jax_profile:
+            logger.warning(f"Could not profile JAX backend (likely not available or error during setup): {e_jax_profile}")
             
     else:
-        logger.error("  Log likelihood functions not available for timeit benchmarking.")
+        logger.error("  Log likelihood function not available for profiling with xp context.")
 
-    # 6. Profiling Full MCMC Run
-    logger.info("\nTest 6: Profiling full MCMC runs...")
-    if True: # Simpler condition for now, assuming mock data setup is always done
-        # For MCMC profiling, we need one instance that is definitely looped and one that is 
-        # definitely vectorized (or dynamically chooses vectorization, which it should for mock data)
+    # 5. Timeit Benchmarking Section - Adapt similarly to profiling
+    logger.info("\nTest 5: Benchmarking with timeit...")
+    if 'log_like_numpy_looped' in locals() and 'log_like_numpy_vec' in locals(): # Check if numpy versions were created
+        import timeit
         
-        mcmc_log_like_looped = H0LogLikelihood(
-            mock_dL_gw, mock_host_zs, 
-            use_vectorized_likelihood=False # Force loop
-        )
-        # The main log_like_func from Test 1 is already dynamically determined.
-        # For mock_dL_gw (1000) and mock_host_zs (100), 1000*100 = 100,000 elements.
-        # 4GB / 8 bytes = 536,870,912 elements. So it SHOULD be vectorized.
-        mcmc_log_like_dynamic_vectorized = get_log_likelihood_h0(mock_dL_gw, mock_host_zs)
+        n_timeit_runs = 100
+        n_timeit_repeat = 5
+        timeit_globals_np_loop = {"func": log_like_numpy_looped, "val": [70.0, 0.0]}
+        timeit_globals_np_vec = {"func": log_like_numpy_vec, "val": [70.0, 0.0]}
 
-        # Profile MCMC with Looped Likelihood
-        logger.info("  Profiling MCMC with (forced) looped likelihood...")
-        pr_mcmc_loop = cProfile.Profile()
-        pr_mcmc_loop.enable()
-        sampler_loop = run_mcmc_h0(
-            mcmc_log_like_looped, 
-            mock_event + "_LoopedProf",
-            n_walkers=test_mcmc_walkers,
-            n_steps=test_mcmc_steps
-        )
-        pr_mcmc_loop.disable()
-        if sampler_loop:
-            logger.info(f"    MCMC with looped likelihood finished. Processing {mock_event}_LoopedProf samples...")
-            _ = process_mcmc_samples(sampler_loop, mock_event + "_LoopedProf", burnin=test_mcmc_burnin, thin_by=2)
-        s_mcmc_loop = io.StringIO()
-        ps_mcmc_loop = pstats.Stats(pr_mcmc_loop, stream=s_mcmc_loop).sort_stats('cumulative')
-        ps_mcmc_loop.print_stats(30) # Print top 30 cumulative time consumers
-        logger.info("\n--- cProfile results for MCMC with Looped Likelihood ---")
-        print(s_mcmc_loop.getvalue())
+        logger.info(f"  Timing NumPy looped version ({n_timeit_runs} calls, {n_timeit_repeat} repeats)...")
+        looped_times = timeit.repeat("func(val)", globals=timeit_globals_np_loop, number=n_timeit_runs, repeat=n_timeit_repeat)
+        min_looped_time = min(looped_times) / n_timeit_runs
+        logger.info(f"    Min time per call (NumPy looped): {min_looped_time*1e6:.2f} microseconds")
 
-        # Profile MCMC with Vectorized Likelihood
-        logger.info("  Profiling MCMC with (dynamically chosen, expected vectorized) likelihood...")
-        pr_mcmc_vec = cProfile.Profile()
-        pr_mcmc_vec.enable()
-        sampler_vec = run_mcmc_h0(
-            mcmc_log_like_dynamic_vectorized, 
-            mock_event + "_VectorizedProf",
-            n_walkers=test_mcmc_walkers,
-            n_steps=test_mcmc_steps
-        )
-        pr_mcmc_vec.disable()
-        if sampler_vec:
-            logger.info(f"    MCMC with vectorized likelihood finished. Processing {mock_event}_VectorizedProf samples...")
-            _ = process_mcmc_samples(sampler_vec, mock_event + "_VectorizedProf", burnin=test_mcmc_burnin, thin_by=2)
-        s_mcmc_vec = io.StringIO()
-        ps_mcmc_vec = pstats.Stats(pr_mcmc_vec, stream=s_mcmc_vec).sort_stats('cumulative')
-        ps_mcmc_vec.print_stats(30)
-        logger.info("\n--- cProfile results for MCMC with Vectorized Likelihood ---")
-        print(s_mcmc_vec.getvalue())
+        logger.info(f"  Timing NumPy vectorized version ({n_timeit_runs} calls, {n_timeit_repeat} repeats)...")
+        vectorized_times = timeit.repeat("func(val)", globals=timeit_globals_np_vec, number=n_timeit_runs, repeat=n_timeit_repeat)
+        min_vectorized_time = min(vectorized_times) / n_timeit_runs
+        logger.info(f"    Min time per call (NumPy vectorized): {min_vectorized_time*1e6:.2f} microseconds")
+        
+        if min_vectorized_time < min_looped_time:
+            logger.info(f"    NumPy Vectorized is approx {min_looped_time/min_vectorized_time:.2f}x faster.")
+        else:
+            logger.info(f"    NumPy Looped is approx {min_vectorized_time/min_looped_time:.2f}x faster (or similar speed).")
+
+        if 'log_like_jax' in locals():
+            # JAX timeit needs careful handling of compilation
+            # It's often better to benchmark JAX by calling a jitted function multiple times
+            # and using block_until_ready(). timeit might not give the full picture due to JIT overhead on first calls.
+            # For a simple comparison here:
+            from functools import partial
+            
+            @partial(xp_jax.jit, static_argnums=(0,))
+            def jax_call_for_timeit(func_obj, val_jax):
+                return func_obj(val_jax)
+
+            # Warm-up / JIT compilation
+            # test_val_jax = xp_jax.array([70.0, 0.0])
+            # _ = jax_call_for_timeit(log_like_jax, test_val_jax).block_until_ready()
+            
+            # timeit_globals_jax = {"func_jitted": partial(jax_call_for_timeit, log_like_jax) , "val_j": test_val_jax}
+            # logger.info(f"  Timing JAX version ({n_timeit_runs} calls, {n_timeit_repeat} repeats)...")
+            # jax_times = timeit.repeat("func_jitted(val_j).block_until_ready()", globals=timeit_globals_jax, number=n_timeit_runs, repeat=n_timeit_repeat)
+            # min_jax_time = min(jax_times) / n_timeit_runs
+            # logger.info(f"    Min time per call (JAX): {min_jax_time*1e6:.2f} microseconds")
+            # if min_jax_time < min_vectorized_time:
+            #    logger.info(f"    JAX is approx {min_vectorized_time/min_jax_time:.2f}x faster than NumPy vectorized.")
+            # else:
+            #    logger.info(f"    NumPy Vectorized is approx {min_jax_time/min_vectorized_time:.2f}x faster than JAX (or similar speed).")
+            logger.info("    (JAX timeit requires careful setup with JIT compilation and block_until_ready, simplified here)")
+
+
     else:
-        logger.error("  Log likelihood functions not available for MCMC profiling.")
+        logger.error("  Log likelihood functions (NumPy versions) not available for timeit benchmarking.")
 
-    logger.info("\n--- Finished testing h0_mcmc_analyzer.py ---") 
+    # 6. Profiling Full MCMC Run - This would also need adaptation
+    logger.info("\nTest 6: Profiling full MCMC runs (SKIPPING for this refactoring stage due to complexity of adapting MCMC part)...")
+    # The MCMC part uses emcee, which expects numpy arrays for initial positions.
+    # The log_likelihood_func passed to emcee would now be xp-aware.
+    # If JAX is used, emcee might run slower if not integrated carefully (e.g., passing JAX arrays directly).
+    # This requires more thought on how emcee interacts with JAX functions (e.g. `jax.experimental.host_callback`).
+    # For now, the main goal is to make the likelihood function itself backend-agnostic.
+
+    logger.info("\n--- Finished testing h0_mcmc_analyzer.py (with backend adaptations) ---")

@@ -110,6 +110,7 @@ def run_full_analysis(
     cdf_threshold: float = CDF_THRESHOLD,
     catalog_type: str = CATALOG_TYPE,
     host_z_max_fallback: float = HOST_Z_MAX_FALLBACK,
+    backend_override: Optional[str] = None, # Added: backend_override
 ) -> dict:
     """Execute the full analysis workflow for a GW event.
 
@@ -120,6 +121,8 @@ def run_full_analysis(
         cdf_threshold: Credible level threshold for the sky mask.
         catalog_type: Galaxy catalog identifier.
         host_z_max_fallback: Fallback redshift cut if estimation fails.
+        backend_override (Optional[str]): If provided, overrides the backend specified
+                                         in the config file. ("auto", "numpy", "jax").
 
     Returns:
         Dictionary containing intermediate and final data products. If an error
@@ -143,6 +146,14 @@ def run_full_analysis(
         "flat_h0_samples": None,
         "error": None,
     }
+
+    # Determine backend to use
+    if backend_override:
+        current_backend_str = backend_override
+        logger.info(f"Using backend override: {current_backend_str}")
+    else:
+        current_backend_str = CONFIG.computation.backend
+        logger.info(f"Using backend from config: {current_backend_str}")
 
     try:
         cache_dir = configure_astropy_cache(CONFIG.fetcher["cache_dir_name"])
@@ -213,7 +224,14 @@ def run_full_analysis(
         results["candidate_hosts_df"] = candidate_hosts
 
         if perform_mcmc:
+            # Ensure candidate_hosts is not empty and has required columns
+            if candidate_hosts.empty or not all(col in candidate_hosts.columns for col in ['z', 'mass_proxy', 'z_err']):
+                 raise RuntimeError("Candidate host galaxy data is missing or incomplete for MCMC.")
+            if dL_samples is None or len(dL_samples) == 0:
+                raise RuntimeError("GW luminosity distance samples are missing for MCMC.")
+
             log_likelihood = get_log_likelihood_h0(
+                current_backend_str, # Pass the chosen backend string
                 dL_samples,
                 candidate_hosts["z"].values,
                 candidate_hosts["mass_proxy"].values,

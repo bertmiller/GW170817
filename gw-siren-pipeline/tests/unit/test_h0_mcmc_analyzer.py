@@ -1,11 +1,32 @@
 import pytest
 import numpy as np
-from astropy.cosmology import FlatLambdaCDM
-from astropy import units as u
+import importlib # For checking if JAX is installed
+# from astropy.cosmology import FlatLambdaCDM # No longer used in H0LogLikelihood
+# from astropy import units as u # No longer used in H0LogLikelihood
 
 from gwsiren.h0_mcmc_analyzer import (
     H0LogLikelihood,
     get_log_likelihood_h0,
+    # DEFAULT_SIGMA_V_PEC, # These are used by H0LogLikelihood constructor defaults
+    # DEFAULT_C_LIGHT,
+    # DEFAULT_OMEGA_M,
+    # DEFAULT_H0_PRIOR_MIN,
+    # DEFAULT_H0_PRIOR_MAX,
+)
+from gwsiren.backends import get_xp # To get xp_np for direct instantiation
+# from gwsiren import CONFIG # Not strictly needed if passing backend_str directly
+
+
+# Example mock data (adjust sizes as needed for thorough testing)
+MOCK_DL_GW_SAMPLES = np.array(np.random.normal(loc=700, scale=70, size=100), dtype=np.float64)
+MOCK_HOST_ZS = np.array([0.1, 0.12, 0.09, 0.15, 0.11] * 5, dtype=np.float64) # N_hosts = 25
+MOCK_HOST_MASS_PROXY = np.array(np.random.uniform(low=10, high=100, size=len(MOCK_HOST_ZS)), dtype=np.float64)
+MOCK_HOST_Z_ERR = np.array(np.random.uniform(low=0.001, high=0.01, size=len(MOCK_HOST_ZS)), dtype=np.float64)
+MOCK_THETA = np.array([70.0, 0.1], dtype=np.float64) # H0, alpha
+
+
+@pytest.fixture(autouse=True)
+def _stub_main_module(monkeypatch):
     DEFAULT_SIGMA_V_PEC,
     DEFAULT_C_LIGHT,
     DEFAULT_OMEGA_M,
@@ -263,9 +284,67 @@ def test_h0_loglikelihood_weight_application(
 
     # Force per-galaxy log likelihood terms to zero so only weights matter
     mocker.patch(
-        "gwsiren.h0_mcmc_analyzer.norm.logpdf",
-        side_effect=lambda x, loc=None, scale=None: np.zeros_like(x),
+        "gwsiren.backends.logpdf_normal_xp", # Patching the backend version now
+        # This mock needs to be careful about the xp argument if it's called by different backends.
+        # For simplicity, assuming it's called with numpy arrays for this weight test.
+        # A more robust mock might inspect `xp` or be specific to the H0LogLikelihood instance.
+        side_effect=lambda xp, x, loc=None, scale=None: xp.zeros_like(x) if hasattr(xp, 'zeros_like') else np.zeros_like(x),
     )
 
     actual_log_L = likelihood([70.0, alpha_input])
     assert np.isclose(actual_log_L, expected_log_L)
+
+
+@pytest.mark.skipif(not importlib.util.find_spec("jax"), reason="JAX not installed, skipping JAX comparison tests")
+def test_numerical_equivalence_numpy_vectorized_vs_jax():
+    # For NumPy vectorized path, get_log_likelihood_h0 will choose it for small data.
+    ll_numpy_vec_obj = get_log_likelihood_h0(
+        requested_backend_str="numpy",
+        dL_gw_samples=MOCK_DL_GW_SAMPLES.copy(),
+        host_galaxies_z=MOCK_HOST_ZS.copy(),
+        host_galaxies_mass_proxy=MOCK_HOST_MASS_PROXY.copy(),
+        host_galaxies_z_err=MOCK_HOST_Z_ERR.copy()
+    )
+    # JAX will use its single optimized path
+    ll_jax_obj = get_log_likelihood_h0(
+        requested_backend_str="jax",
+        dL_gw_samples=MOCK_DL_GW_SAMPLES.copy(),
+        host_galaxies_z=MOCK_HOST_ZS.copy(),
+        host_galaxies_mass_proxy=MOCK_HOST_MASS_PROXY.copy(),
+        host_galaxies_z_err=MOCK_HOST_Z_ERR.copy()
+    )
+
+    val_numpy_vec = ll_numpy_vec_obj(MOCK_THETA)
+    val_jax = ll_jax_obj(MOCK_THETA)
+
+    assert np.allclose(val_numpy_vec, val_jax, rtol=1e-8, atol=1e-8), \
+        f"NumPy vectorized ({val_numpy_vec}) and JAX ({val_jax}) outputs differ."
+
+@pytest.mark.skipif(not importlib.util.find_spec("jax"), reason="JAX not installed, skipping JAX comparison tests")
+def test_numerical_equivalence_numpy_looped_vs_jax():
+    # To get NumPy looped path, we directly instantiate H0LogLikelihood
+    xp_np, backend_name_np, _ = get_xp("numpy") # Get the numpy module via get_xp
+
+    ll_numpy_loop_obj = H0LogLikelihood(
+        xp=xp_np, backend_name=backend_name_np,
+        dL_gw_samples=xp_np.asarray(MOCK_DL_GW_SAMPLES),
+        host_galaxies_z=xp_np.asarray(MOCK_HOST_ZS),
+        host_galaxies_mass_proxy=xp_np.asarray(MOCK_HOST_MASS_PROXY),
+        host_galaxies_z_err=xp_np.asarray(MOCK_HOST_Z_ERR),
+        # Default priors and cosmology params from h0_mcmc_analyzer will be used by H0LogLikelihood constructor
+        use_vectorized_likelihood=False # Force looped path for NumPy
+    )
+    
+    ll_jax_obj = get_log_likelihood_h0(
+        requested_backend_str="jax",
+        dL_gw_samples=MOCK_DL_GW_SAMPLES.copy(),
+        host_galaxies_z=MOCK_HOST_ZS.copy(),
+        host_galaxies_mass_proxy=MOCK_HOST_MASS_PROXY.copy(),
+        host_galaxies_z_err=MOCK_HOST_Z_ERR.copy()
+    )
+
+    val_numpy_loop = ll_numpy_loop_obj(MOCK_THETA)
+    val_jax = ll_jax_obj(MOCK_THETA)
+    
+    assert np.allclose(val_numpy_loop, val_jax, rtol=1e-8, atol=1e-8), \
+        f"NumPy looped ({val_numpy_loop}) and JAX ({val_jax}) outputs differ."
