@@ -8,8 +8,8 @@ skymap:
   credible_level:  0.90
 
 mcmc:
-  walkers:         32
-  steps:           2000
+  walkers:         16
+  steps:           200
   burnin:          100
   thin_by:         10
   prior_h0_min:    10.0
@@ -41,13 +41,21 @@ multi_event_analysis:
   events_to_combine:
     - event_id: "GW170817"
     - event_id: "GW190814"
+    - event_id: "GW190425"
+    - event_id: "GW200105_162426"
+    - event_id: "GW200115_042309"
+    - event_id: "GW190910_112807"
+    - event_id: "GW190930_133541"
+    - event_id: "GW191213_130122"
+    - event_id: "GW170814"
+    - event_id: "GW190521"
   priors:
     H0: { min: 10.0, max: 200.0 }
     alpha: { min: -2.0, max: 2.0 }
   mcmc:
-    n_walkers: 100
-    n_steps: 5000
-    burnin: 1000
+    n_walkers: 10
+    n_steps: 250
+    burnin: 100
     thin_by: 10
     initial_pos_config:
       H0: { mean: 70.0, std: 5.0 }

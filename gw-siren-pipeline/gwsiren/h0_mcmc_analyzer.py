@@ -2,7 +2,7 @@ import numpy as np
 import sys
 from scipy.stats import norm
 from numpy.polynomial.hermite import hermgauss
-from scipy.special import logsumexp
+from scipy.special import logsumexp as scipy_logsumexp # Keep for numpy
 from astropy.cosmology import FlatLambdaCDM
 from astropy import units as u
 import emcee
@@ -12,6 +12,15 @@ import pstats
 import io
 from gwsiren import CONFIG
 from gwsiren.backends import log_gaussian, get_xp
+
+# Try to import JAX special functions for JAX backend
+try:
+    import jax.numpy as jnp # jnp is used for type hinting or explicit jax calls if needed
+    import jax.scipy.special as jsp
+    jax_scipy_logsumexp = jsp.logsumexp
+except ImportError:
+    jnp = None
+    jax_scipy_logsumexp = None
 
 logger = logging.getLogger(__name__)
 
@@ -48,8 +57,9 @@ def _calculate_vectorized_log_likelihood_core(
     h0_max: float,
     alpha_min: float,
     alpha_max: float,
-    xp: object,
+    xp: object, 
     log_gaussian_func: callable,
+    logsumexp_func: callable,
     num_gw_samples: int,
 ) -> float:
     """Core vectorized likelihood calculation.
@@ -57,28 +67,7 @@ def _calculate_vectorized_log_likelihood_core(
     This function performs the heavy numerical work of the likelihood using the
     provided backend ``xp``. It contains no side effects and is therefore
     suitable for JIT compilation with JAX.
-
-    Args:
-        theta: Tuple of ``(H0, alpha)`` parameters.
-        dL_gw_samples: Array of GW luminosity distance samples.
-        mass_proxy_values: Mass proxy values for the host galaxies.
-        base_dl_for_hosts: Precomputed luminosity distance at ``H0=1`` for each
-            host galaxy redshift.
-        sigma_v_pec: Peculiar velocity dispersion in km/s.
-        c_light: Speed of light in km/s.
-        h0_min: Minimum allowed value of ``H0``.
-        h0_max: Maximum allowed value of ``H0``.
-        alpha_min: Minimum allowed value of ``alpha``.
-        alpha_max: Maximum allowed value of ``alpha``.
-        xp: Numerical backend module (``numpy`` or ``jax.numpy``).
-        log_gaussian_func: Callable implementing the log Gaussian PDF.
-        num_gw_samples: Number of GW samples.
-
-    Returns:
-        The log-likelihood value. ``-xp.inf`` if parameters are outside the
-        allowed range or numerical issues occur.
     """
-
     H0, alpha = theta
 
     if not (h0_min <= H0 <= h0_max):
@@ -100,7 +89,7 @@ def _calculate_vectorized_log_likelihood_core(
         return -xp.inf
 
     log_pdf_values_full = log_gaussian_func(
-        xp,
+        xp, # Use the passed xp
         dL_gw_samples[:, xp.newaxis],
         model_d_for_hosts[xp.newaxis, :],
         sigma_d_val_for_hosts[xp.newaxis, :],
@@ -108,7 +97,7 @@ def _calculate_vectorized_log_likelihood_core(
     log_pdf_values_full = xp.nan_to_num(log_pdf_values_full, nan=-xp.inf)
 
     log_sum_over_gw_samples = (
-        xp.logaddexp.reduce(log_pdf_values_full, axis=0)
+        logsumexp_func(log_pdf_values_full, axis=0)
         - xp.log(num_gw_samples)
     )
 
@@ -127,7 +116,7 @@ def _calculate_vectorized_log_likelihood_core(
     if xp.sum(valid_mask) == 0:
         return -xp.inf
 
-    total_log_likelihood = xp.logaddexp.reduce(
+    total_log_likelihood = logsumexp_func(
         xp.log(weights[valid_mask]) + log_sum_over_gw_samples[valid_mask]
     )
 
@@ -153,7 +142,6 @@ class H0LogLikelihood:
         alpha_max: Upper prior bound on ``alpha``.
         use_vectorized_likelihood: Whether to use the vectorised likelihood
             implementation.
-        xp: Numerical backend module to use (defaults to ``numpy``).
         backend_name: Name of the selected backend.
     """
     def __init__(
@@ -171,7 +159,6 @@ class H0LogLikelihood:
         alpha_max=DEFAULT_ALPHA_PRIOR_MAX,
         use_vectorized_likelihood=False,
         *,
-        xp=np,
         backend_name="numpy",
     ):
         
@@ -209,42 +196,38 @@ class H0LogLikelihood:
         self.alpha_min = alpha_min
         self.alpha_max = alpha_max
 
-        self.xp = xp
         self.backend_name = backend_name
 
-        # Pre-create a base cosmology object to avoid repeated construction
-        # during likelihood evaluations. Using ``H0=1`` allows scaling
-        # distances for arbitrary ``H0`` values without recomputing the
-        # cosmology internals.
-        self._base_cosmo = FlatLambdaCDM(
-            H0=1.0 * u.km / u.s / u.Mpc, Om0=self.omega_m_val
-        )
-        self._base_dl_for_hosts = self._base_cosmo.luminosity_distance(self.z_values).value
+        if self.backend_name == "jax":
+            if jax_scipy_logsumexp is None:
+                raise ImportError("JAX backend selected but jax.scipy.special.logsumexp could not be imported.")
+            self._logsumexp_func_for_current_backend = jax_scipy_logsumexp
+            self._logsumexp_func_for_jit = jax_scipy_logsumexp
+        elif self.backend_name == "numpy":
+            self._logsumexp_func_for_current_backend = scipy_logsumexp
+            self._logsumexp_func_for_jit = None # Not applicable for NumPy
+        else:
+            raise ValueError(f"Unsupported backend: {self.backend_name} for logsumexp selection")
 
         self._log_gaussian_func = log_gaussian
-        self._num_gw_samples = len(self.dL_gw_samples)
 
-        if self.backend_name == "jax" and hasattr(self.xp, "jit"):
-            static_arg_names = (
-                "sigma_v_pec",
-                "c_light",
-                "h0_min",
-                "h0_max",
-                "alpha_min",
-                "alpha_max",
-                "xp",
-                "log_gaussian_func",
-                "num_gw_samples",
-            )
-            self._jitted_likelihood_core = self.xp.jit(
-                _calculate_vectorized_log_likelihood_core,
-                static_argnames=static_arg_names,
-            )
-        else:
-            self._jitted_likelihood_core = None
+        self._base_cosmo = FlatLambdaCDM(H0=1.0 * u.km / u.s / u.Mpc, Om0=self.omega_m_val)
+        self._base_dl_for_hosts = self._base_cosmo.luminosity_distance(self.z_values).value
+        self._num_gw_samples = len(self.dL_gw_samples)
 
         self._n_quad_points = 5
         self._quad_nodes, self._quad_weights = hermgauss(self._n_quad_points)
+
+    def _get_active_xp_module(self):
+        """Returns the numerical module (numpy or jax.numpy) based on backend_name."""
+        if self.backend_name == "jax":
+            if jnp is None:
+                raise ImportError("JAX backend selected, but jax.numpy (jnp) is not available/imported globally in h0_mcmc_analyzer.py.")
+            return jnp
+        elif self.backend_name == "numpy":
+            return np
+        else:
+            raise ValueError(f"Unsupported backend: {self.backend_name}")
 
     def _lum_dist_model(self, z, H0_val):
         """Compute luminosity distance for ``z`` and ``H0_val``.
@@ -262,8 +245,33 @@ class H0LogLikelihood:
         return base_distance / H0_val
 
     def __call__(self, theta):
-        if self.backend_name == "jax" and self._jitted_likelihood_core is not None:
-            return self._jitted_likelihood_core(
+        active_xp = self._get_active_xp_module()
+
+        # JAX JIT path: Apply JIT on-the-fly
+        if self.backend_name == "jax" and hasattr(active_xp, "jit") and self.use_vectorized_likelihood:
+            # Define static argument names for this JIT compilation
+            # These are arguments to _calculate_vectorized_log_likelihood_core that are static for JIT
+            static_argnames_for_call = (
+                "sigma_v_pec",
+                "c_light",
+                "h0_min",
+                "h0_max",
+                "alpha_min",
+                "alpha_max",
+                "log_gaussian_func",
+                "logsumexp_func",
+                "num_gw_samples",
+                "xp",  # Add xp module itself as a static argument
+            )
+            
+            # JIT the core calculation function for this call
+            # active_xp is jax.numpy (or jnp), so active_xp.jit is jax.jit
+            jitted_core_function = active_xp.jit(
+                _calculate_vectorized_log_likelihood_core, 
+                static_argnames=static_argnames_for_call
+            )
+            
+            return jitted_core_function(
                 theta=theta,
                 dL_gw_samples=self.dL_gw_samples,
                 mass_proxy_values=self.mass_proxy_values,
@@ -274,11 +282,13 @@ class H0LogLikelihood:
                 h0_max=self.h0_max,
                 alpha_min=self.alpha_min,
                 alpha_max=self.alpha_max,
-                xp=self.xp,
-                log_gaussian_func=self._log_gaussian_func,
+                xp=active_xp, # Pass the JAX numpy module (active_xp)
+                log_gaussian_func=self._log_gaussian_func, # Pass gwsiren.backends.log_gaussian
+                logsumexp_func=self._logsumexp_func_for_jit, # Pass jax_scipy_logsumexp
                 num_gw_samples=self._num_gw_samples,
             )
 
+        # Fallback to non-JIT vectorized or looped calculation
         if self.use_vectorized_likelihood:
             return _calculate_vectorized_log_likelihood_core(
                 theta=theta,
@@ -291,29 +301,33 @@ class H0LogLikelihood:
                 h0_max=self.h0_max,
                 alpha_min=self.alpha_min,
                 alpha_max=self.alpha_max,
-                xp=self.xp,
+                xp=active_xp, # Use active_xp (numpy or jax.numpy for non-JIT JAX)
                 log_gaussian_func=self._log_gaussian_func,
+                logsumexp_func=self._logsumexp_func_for_current_backend,
                 num_gw_samples=self._num_gw_samples,
             )
 
-        # --- Memory-Efficient Loop with Redshift Marginalization ---
-        H0, alpha = theta
+        # --- Memory-Efficient Loop with Redshift Marginalization (Original non-vectorized path) ---
+        # H0, alpha already unpacked if not JAX path, or re-unpack if needed
+        if 'H0' not in locals(): # ensure H0, alpha are defined
+             H0, alpha = theta
+
         if not (self.h0_min <= H0 <= self.h0_max):
-            return -self.xp.inf
+            return -active_xp.inf
 
         try:
             model_d_for_hosts = self._lum_dist_model(self.z_values, H0)
-            if self.xp.any(~self.xp.isfinite(model_d_for_hosts)):
-                return -self.xp.inf
+            if active_xp.any(~active_xp.isfinite(model_d_for_hosts)):
+                return -active_xp.inf
         except Exception:
-            return -self.xp.inf
+            return -active_xp.inf
 
         sigma_d_val_for_hosts = (model_d_for_hosts / self.c_val) * self.sigma_v
-        sigma_d_val_for_hosts = self.xp.maximum(sigma_d_val_for_hosts, 1e-9)
-        if self.xp.any(~self.xp.isfinite(sigma_d_val_for_hosts)):
-            return -self.xp.inf
+        sigma_d_val_for_hosts = active_xp.maximum(sigma_d_val_for_hosts, 1e-9)
+        if active_xp.any(~active_xp.isfinite(sigma_d_val_for_hosts)):
+            return -active_xp.inf
 
-        log_P_data_H0_zi_terms = self.xp.zeros(len(self.z_values))
+        log_P_data_H0_zi_terms = active_xp.zeros(len(self.z_values))
         for i in range(len(self.z_values)):
             mu_z = self.z_values[i]
             sigma_z = self.z_err_values[i]
@@ -322,74 +336,73 @@ class H0LogLikelihood:
                 current_model_d = model_d_for_hosts[i]
                 current_sigma_d = sigma_d_val_for_hosts[i]
                 log_pdf_for_one_galaxy = self._log_gaussian_func(
-                    self.xp,
+                    active_xp,
                     self.dL_gw_samples,
                     current_model_d,
                     current_sigma_d,
                 )
-                if self.xp.any(~self.xp.isfinite(log_pdf_for_one_galaxy)):
-                    log_P_data_H0_zi_terms[i] = -self.xp.inf
+                if active_xp.any(~active_xp.isfinite(log_pdf_for_one_galaxy)):
+                    log_P_data_H0_zi_terms[i] = -active_xp.inf
                 else:
                     log_P_data_H0_zi_terms[i] = (
-                        self.xp.logaddexp.reduce(log_pdf_for_one_galaxy)
-                        - self.xp.log(self._num_gw_samples)
+                        self._logsumexp_func_for_current_backend(log_pdf_for_one_galaxy)
+                        - active_xp.log(self._num_gw_samples)
                     )
                 continue
 
             integrated_prob = 0.0
             for node, weight in zip(self._quad_nodes, self._quad_weights):
-                z_j = mu_z + self.xp.sqrt(2.0) * sigma_z * node
+                z_j = mu_z + active_xp.sqrt(2.0) * sigma_z * node
                 if z_j <= 0:
                     continue
                 model_d = self._lum_dist_model(z_j, H0)
-                sigma_d = self.xp.maximum((model_d / self.c_val) * self.sigma_v, 1e-9)
+                sigma_d = active_xp.maximum((model_d / self.c_val) * self.sigma_v, 1e-9)
                 log_pdf = self._log_gaussian_func(
-                    self.xp,
+                    active_xp,
                     self.dL_gw_samples,
                     model_d,
                     sigma_d,
                 )
-                if self.xp.any(~self.xp.isfinite(log_pdf)):
+                if active_xp.any(~active_xp.isfinite(log_pdf)):
                     continue
-                P_event = self.xp.exp(
-                    self.xp.logaddexp.reduce(log_pdf) - self.xp.log(self._num_gw_samples)
+                P_event = active_xp.exp(
+                    active_xp.logsumexp(log_pdf) - active_xp.log(self._num_gw_samples)
                 )
-                integrated_prob += (weight / self.xp.sqrt(self.xp.pi)) * P_event
+                integrated_prob += (weight / active_xp.sqrt(active_xp.pi)) * P_event
 
             if integrated_prob > 0:
-                log_P_data_H0_zi_terms[i] = self.xp.log(integrated_prob)
+                log_P_data_H0_zi_terms[i] = active_xp.log(integrated_prob)
             else:
-                log_P_data_H0_zi_terms[i] = -self.xp.inf
+                log_P_data_H0_zi_terms[i] = -active_xp.inf
 
         log_sum_over_gw_samples = log_P_data_H0_zi_terms
 
-        alpha = theta[1]
         if not (self.alpha_min <= alpha <= self.alpha_max):
-            return -self.xp.inf
+            return -active_xp.inf
 
-        if self.xp.isclose(alpha, 0.0):
-            weights = self.xp.full(
+        if active_xp.isclose(alpha, 0.0):
+            weights = active_xp.full(
                 len(self.mass_proxy_values), 1.0 / len(self.mass_proxy_values)
             )
         else:
             powered = self.mass_proxy_values ** alpha
-            if self.xp.any(powered <= 0) or self.xp.any(~self.xp.isfinite(powered)):
-                return -self.xp.inf
+            if active_xp.any(powered <= 0) or active_xp.any(~active_xp.isfinite(powered)):
+                return -active_xp.inf
             denom = powered.sum()
-            if denom <= 0 or not np.isfinite(denom):
-                return -self.xp.inf
+            if denom <= 0 or not np.isfinite(denom): # Using np.isfinite here for denom as it's a scalar sum from numpy array
+                return -active_xp.inf
             weights = powered / denom
 
-        valid_mask = (weights > 0) & self.xp.isfinite(log_sum_over_gw_samples)
-        if not self.xp.any(valid_mask):
-            return -self.xp.inf
+        valid_mask = (weights > 0) & active_xp.isfinite(log_sum_over_gw_samples)
+        if not active_xp.any(valid_mask):
+            return -active_xp.inf
 
-        total_log_likelihood = self.xp.logaddexp.reduce(
-            self.xp.log(weights[valid_mask]) + log_sum_over_gw_samples[valid_mask]
+        total_log_likelihood = self._logsumexp_func_for_current_backend(
+            active_xp.log(weights[valid_mask]) + log_sum_over_gw_samples[valid_mask]
         )
 
-        if not self.xp.isfinite(total_log_likelihood):
-            return -self.xp.inf
+        if not active_xp.isfinite(total_log_likelihood):
+            return -active_xp.inf
 
         return float(total_log_likelihood)
 
@@ -473,7 +486,6 @@ def get_log_likelihood_h0(
         alpha_min,
         alpha_max,
         use_vectorized_likelihood=should_use_vectorized,
-        xp=xp_mod,
         backend_name=backend_name,
     )
 
@@ -490,6 +502,13 @@ def get_log_likelihood_h0_vectorized(
     alpha_min=DEFAULT_ALPHA_PRIOR_MIN,
     alpha_max=DEFAULT_ALPHA_PRIOR_MAX,
 ):
+    # Determine backend for explicitly vectorized version
+    # To maintain consistency, it should also not pass xp module directly.
+    # However, H0LogLikelihood now only takes backend_name.
+    # We need to decide which backend to force for "vectorized" if not auto.
+    # Assuming "auto" preference for backend selection, or can default to numpy/try JAX.
+    _xp_mod, backend_name = get_xp("auto") # Or specify "jax" or "numpy" if fixed preference
+
     return H0LogLikelihood(
         dL_gw_samples,
         host_galaxies_z,
@@ -503,6 +522,7 @@ def get_log_likelihood_h0_vectorized(
         alpha_min,
         alpha_max,
         use_vectorized_likelihood=True,
+        backend_name=backend_name, # Pass backend_name
     )
 
 def run_mcmc_h0(
@@ -765,8 +785,8 @@ if __name__ == '__main__':
         
         # For timeit, we want to compare an explicitly looped vs explicitly vectorized (or dynamically vectorized)
         # log_like_func is now dynamic. Let's create specific instances for timeit.
-        timeit_looped_instance = H0LogLikelihood(mock_dL_gw, mock_host_zs, use_vectorized_likelihood=False)
-        timeit_vectorized_instance = H0LogLikelihood(mock_dL_gw, mock_host_zs, use_vectorized_likelihood=True)
+        timeit_looped_instance = H0LogLikelihood(mock_dL_gw, mock_host_zs, use_vectorized_likelihood=False, backend_name="numpy") # Specify backend
+        timeit_vectorized_instance = H0LogLikelihood(mock_dL_gw, mock_host_zs, use_vectorized_likelihood=True, backend_name=get_xp("auto")[1]) # Specify backend
         # Or use the dynamic one for vectorized, assuming it picks vectorization for mock data:
         # timeit_vectorized_instance = get_log_likelihood_h0(mock_dL_gw, mock_host_zs)
 
@@ -819,6 +839,7 @@ if __name__ == '__main__':
         mcmc_log_like_looped = H0LogLikelihood(
             mock_dL_gw, mock_host_zs, 
             use_vectorized_likelihood=False # Force loop
+            , backend_name="numpy" # Specify backend
         )
         # The main log_like_func from Test 1 is already dynamically determined.
         # For mock_dL_gw (1000) and mock_host_zs (100), 1000*100 = 100,000 elements.
