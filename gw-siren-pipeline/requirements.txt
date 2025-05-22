@@ -3,7 +3,7 @@ pandas
 matplotlib
 healpy
 astropy
-scipy==1.14.1
+scipy==1.11.4
 emcee
 pesummary==1.4.0
 pyyaml
