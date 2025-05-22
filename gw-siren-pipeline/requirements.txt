@@ -1,11 +1,13 @@
-numpy
+numpy==1.23.5
 pandas
 matplotlib
 healpy
 astropy
-scipy
+scipy==1.14.1
 emcee
-pesummary
+pesummary==1.4.0
 pyyaml
 pytest
 pytest-mock
+gwcosmo==2.1.1
+blosc2==2.7.1
