@@ -12,12 +12,49 @@ import pytest
 # Force JAX CPU for testing
 os.environ["JAX_PLATFORM_NAME"] = "cpu"
 
-# Allow importing helper modules from this directory
-sys.path.append(str(pathlib.Path(__file__).resolve().parent))
-
 from gwsiren.h0_mcmc_analyzer import get_log_likelihood_h0
 from gwsiren.combined_likelihood import CombinedLogLikelihood
-from utils.mock_data import mock_event, multi_event
+
+# Mock data utilities (inlined to avoid dependencies)
+def mock_event(event_id="EV", seed=1, n_galaxies=5):
+    """Provide a simple mock event with deterministic data."""
+    if seed is not None:
+        np.random.seed(seed)
+    
+    import pandas as pd
+    from collections import namedtuple
+    
+    # Create mock distance samples
+    dl_samples = np.random.lognormal(mean=np.log(100), sigma=0.3, size=50)
+    
+    # Create mock galaxy catalog
+    galaxies_data = {
+        'z': np.random.uniform(0.01, 0.05, n_galaxies),
+        'mass_proxy': np.random.lognormal(mean=0, sigma=0.5, size=n_galaxies),
+        'z_err': np.random.uniform(0.001, 0.01, n_galaxies)
+    }
+    candidate_galaxies_df = pd.DataFrame(galaxies_data)
+    
+    # Create named tuple to match expected interface
+    EventDataPackage = namedtuple('EventDataPackage', ['event_id', 'dl_samples', 'candidate_galaxies_df'])
+    
+    return EventDataPackage(
+        event_id=event_id,
+        dl_samples=dl_samples,
+        candidate_galaxies_df=candidate_galaxies_df
+    )
+
+def multi_event(n_events=2, seed=10):
+    """Create multiple mock events for testing."""
+    if seed is not None:
+        np.random.seed(seed)
+    
+    events = []
+    for i in range(n_events):
+        event_seed = seed + i if seed is not None else None
+        events.append(mock_event(event_id=f"EV{i}", seed=event_seed, n_galaxies=3))
+    
+    return events
 
 
 @pytest.fixture
@@ -26,7 +63,7 @@ def simple_event():
     return mock_event(event_id="EV", seed=1)
 
 
-def test_single_event_likelihood_peak(simple_event, mock_config):
+def test_single_event_likelihood_peak(simple_event):
     """Likelihood should be finite near true parameters."""
     pkg = simple_event
     ll = get_log_likelihood_h0(
@@ -37,11 +74,14 @@ def test_single_event_likelihood_peak(simple_event, mock_config):
         host_galaxies_z_err=pkg.candidate_galaxies_df["z_err"].values,
     )
     val = ll([70.0, 0.0])
-    assert isinstance(val, float)
+    # Handle both Python float and JAX Array types
+    assert np.isscalar(val) or hasattr(val, 'item')
+    # Check that it's finite
+    assert np.isfinite(val)
 
 
 @pytest.mark.parametrize("h0", [5.0, 250.0])
-def test_single_event_likelihood_out_of_bounds(simple_event, h0, mock_config):
+def test_single_event_likelihood_out_of_bounds(simple_event, h0):
     """Parameters outside prior range return ``-np.inf``."""
     pkg = simple_event
     ll = get_log_likelihood_h0(
@@ -55,7 +95,7 @@ def test_single_event_likelihood_out_of_bounds(simple_event, h0, mock_config):
 
 
 @pytest.mark.skipif(not importlib.util.find_spec("jax"), reason="JAX not installed")
-def test_numpy_vs_jax_consistency(simple_event, mock_config):
+def test_numpy_vs_jax_consistency(simple_event):
     """NumPy and JAX backends should give the same value."""
     # Clear backend cache to avoid interference
     from gwsiren.backends import clear_backend_cache
@@ -87,7 +127,7 @@ def test_numpy_vs_jax_consistency(simple_event, mock_config):
         pytest.skip("Backends produced incompatible results")
 
 
-def test_combined_likelihood_sum(mock_config):
+def test_combined_likelihood_sum():
     """``CombinedLogLikelihood`` sums individual event likelihoods."""
     events = multi_event(n_events=2, seed=10)
     combined = CombinedLogLikelihood(events)
@@ -107,5 +147,4 @@ def test_combined_likelihood_sum(mock_config):
     if np.isfinite(expected) and np.isfinite(result):
         assert np.isclose(result, expected)
     else:
-        assert np.isinf(expected) and np.isinf(result)
-
+        assert np.isinf(expected) and np.isinf(result) 

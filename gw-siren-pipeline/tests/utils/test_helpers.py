@@ -41,5 +41,4 @@ def effective_sample_size(chain: np.ndarray) -> float:
     else:
         t = len(positive_acf)
     ess = n / (1 + 2 * positive_acf[:t].sum())
-    return float(ess)
-
+    return float(ess) 

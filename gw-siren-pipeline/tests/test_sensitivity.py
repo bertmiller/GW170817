@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import sys, pathlib
-sys.path.append(str(pathlib.Path(__file__).resolve().parent))
 import numpy as np
 import pytest
 
 from gwsiren.h0_mcmc_analyzer import get_log_likelihood_h0
-from utils.mock_data import mock_event
+from .utils.mock_data import mock_event
 
 
 def test_prior_width_effect(mock_config):
@@ -24,7 +22,8 @@ def test_prior_width_effect(mock_config):
         h0_max=140,
     )
     val = ll([30.0, 0.0])
-    assert isinstance(val, float)
+    assert np.isscalar(val) or hasattr(val, 'item')
+    assert np.isfinite(val)
 
 
 def test_fixed_parameters_effect(mock_config):
@@ -48,6 +47,7 @@ def test_fixed_parameters_effect(mock_config):
     )
     val1 = ll1([70.0, 0.0])
     val2 = ll2([70.0, 0.0])
-    assert isinstance(val1, float)
-    assert isinstance(val2, float)
-
+    assert np.isscalar(val1) or hasattr(val1, 'item')
+    assert np.isscalar(val2) or hasattr(val2, 'item')
+    assert np.isfinite(val1)
+    assert np.isfinite(val2) 

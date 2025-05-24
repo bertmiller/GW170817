@@ -2,14 +2,10 @@
 
 from __future__ import annotations
 
-import sys
-import pathlib
 import numpy as np
 import pytest
 
-sys.path.append(str(pathlib.Path(__file__).resolve().parent))
-
-from utils.test_helpers import rhat, effective_sample_size
+from .utils.test_helpers import rhat, effective_sample_size
 
 
 def test_rhat_unity_for_identical_chains():
@@ -25,5 +21,4 @@ def test_effective_sample_size_less_than_n():
     chain = rng.normal(size=100)
     chain[1:] = chain[:-1] * 0.9 + chain[1:] * 0.1
     ess = effective_sample_size(chain)
-    assert ess < len(chain)
-
+    assert ess < len(chain) 

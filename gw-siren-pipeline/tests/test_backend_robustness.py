@@ -6,9 +6,9 @@ This test suite is designed to catch the types of issues we encountered during
 the JAX/NumPy consistency fixes and prevent similar problems in the future.
 
 Usage:
-    pytest tests/test_backend_robustness.py -v
-    pytest tests/test_backend_robustness.py -m consistency
-    pytest tests/test_backend_robustness.py -m "not slow"
+    pytest gw-siren-pipeline/tests/test_backend_robustness.py -v
+    pytest gw-siren-pipeline/tests/test_backend_robustness.py -m consistency
+    pytest gw-siren-pipeline/tests/test_backend_robustness.py -m "not slow"
 """
 
 import os
@@ -22,10 +22,6 @@ import warnings
 
 # Force JAX CPU for testing
 os.environ["JAX_PLATFORM_NAME"] = "cpu"
-
-# Add paths
-sys.path.append("gw-siren-pipeline")
-sys.path.append("tests")
 
 # Register custom pytest marks to avoid warnings
 pytest_plugins = []
@@ -44,7 +40,47 @@ pytestmark = [
 
 from gwsiren.backends import get_xp, BackendNotAvailableError, logpdf_normal_xp, logsumexp_xp, trapz_xp
 from gwsiren.h0_mcmc_analyzer import get_log_likelihood_h0, H0LogLikelihood
-from utils.mock_data import mock_event
+
+# Import mock data utilities
+def mock_event(n_galaxies=5, seed=None):
+    """Create mock event data for testing."""
+    if seed is not None:
+        np.random.seed(seed)
+    
+    import pandas as pd
+    from collections import namedtuple
+    
+    # Create mock distance samples
+    dl_samples = np.random.lognormal(mean=np.log(100), sigma=0.3, size=50)
+    
+    # Create mock galaxy catalog
+    galaxies_data = {
+        'z': np.random.uniform(0.01, 0.05, n_galaxies),
+        'mass_proxy': np.random.lognormal(mean=0, sigma=0.5, size=n_galaxies),
+        'z_err': np.random.uniform(0.001, 0.01, n_galaxies)
+    }
+    candidate_galaxies_df = pd.DataFrame(galaxies_data)
+    
+    # Create named tuple to match expected interface
+    EventDataPackage = namedtuple('EventDataPackage', ['event_id', 'dl_samples', 'candidate_galaxies_df'])
+    
+    return EventDataPackage(
+        event_id=f"TEST_EVENT_{seed}",
+        dl_samples=dl_samples,
+        candidate_galaxies_df=candidate_galaxies_df
+    )
+
+def multi_event(n_events=2, seed=None):
+    """Create multiple mock events for testing."""
+    if seed is not None:
+        np.random.seed(seed)
+    
+    events = []
+    for i in range(n_events):
+        event_seed = seed + i if seed is not None else None
+        events.append(mock_event(n_galaxies=3, seed=event_seed))
+    
+    return events
 
 
 class TestAPICompatibility:
@@ -497,7 +533,6 @@ class TestIntegration:
             pytest.skip("JAX not available")
         
         # Use multiple events to test robustness
-        from utils.mock_data import multi_event
         events = multi_event(n_events=2, seed=42)
         
         results_numpy = []

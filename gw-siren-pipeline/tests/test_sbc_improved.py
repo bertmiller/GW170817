@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-import sys, pathlib
-sys.path.append(str(pathlib.Path(__file__).resolve().parent))
+import os
 import numpy as np
 import pytest
 from scipy import stats
 
+# Force JAX CPU for testing
+os.environ["JAX_PLATFORM_NAME"] = "cpu"
+
 from gwsiren.h0_mcmc_analyzer import get_log_likelihood_h0, run_mcmc_h0, process_mcmc_samples
-from utils.mock_data import mock_event
+from .utils.mock_data import mock_event
 
 
 def generate_mock_data_from_model(true_h0: float, true_alpha: float, seed: int) -> dict:
@@ -139,7 +141,7 @@ def test_sbc_full_workflow(mock_config):
     else:
         pytest.skip(f"Insufficient successful SBC runs: {len(ranks_h0)}")
 
-
+@pytest.mark.slow
 def test_sbc_coverage_intervals(mock_config):
     """Test that confidence intervals have correct coverage."""
     coverage_levels = [0.5, 0.68, 0.95]

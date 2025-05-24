@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import sys, pathlib
-sys.path.append(str(pathlib.Path(__file__).resolve().parent))
 import numpy as np
 import pytest
 
 from gwsiren.h0_mcmc_analyzer import get_log_likelihood_h0
-from utils.mock_data import multi_event
+from .utils.mock_data import multi_event
 
 
 @pytest.mark.slow
@@ -47,5 +45,4 @@ def test_sbc_multiple_events(mock_config):
             host_galaxies_z_err=packages[0].candidate_galaxies_df["z_err"].values,
         )
         ranks.append(float(ll([h0, alpha])))
-    assert len(ranks) == 5
-
+    assert len(ranks) == 5 
