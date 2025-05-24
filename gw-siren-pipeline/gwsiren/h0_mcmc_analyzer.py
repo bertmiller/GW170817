@@ -222,48 +222,145 @@ class H0LogLikelihood:
         log_sum_over_gw_samples = self.xp.array([-self.xp.inf]) # Placeholder for now
 
         if self.use_vectorized_likelihood:
-            # --- Fully Vectorized Alternative ---
-            # logger.debug("Using fully vectorized likelihood path.")
-            try:
-                # Reshape for broadcasting: 
-                # self.dL_gw_samples: (N_samples,) -> (N_samples, 1)
-                # model_d_for_hosts: (N_hosts,) -> (1, N_hosts)
-                # sigma_d_val_for_hosts: (N_hosts,) -> (1, N_hosts)
-                log_pdf_values_full = logpdf_normal_xp(
-                    self.xp,
-                    self.dL_gw_samples[:, self.xp.newaxis],
-                    loc=model_d_for_hosts[self.xp.newaxis, :],
-                    scale=sigma_d_val_for_hosts[self.xp.newaxis, :]
-                ) # Shape: (N_samples, N_hosts)
-            except Exception as e:
-                # logger.debug(f"EXCEPTION in logpdf_normal_xp (vectorized) for H0 = {H0}: {e}")
-                # If the entire logpdf calculation fails, it likely means a broad issue
-                # (e.g. H0 way off, leading to bad model_d_for_hosts for ALL hosts)
-                # In this case, returning -self.xp.inf for the whole likelihood is appropriate.
-                return -self.xp.inf
-
-            # Handle potential NaNs by converting them to -self.xp.inf.
-            # This allows logaddexp.reduce to correctly ignore them unless an entire column is -self.xp.inf.
-            log_pdf_values_full = self.xp.where(self.xp.isnan(log_pdf_values_full), -self.xp.inf, log_pdf_values_full)
-
-
-            # Check if any galaxy (column) resulted in all -self.xp.inf values for its log_pdf terms.
-            # This can happen if a specific galaxy's model_d or sigma_d was problematic.
-            # all_inf_columns = self.xp.all(log_pdf_values_full == -self.xp.inf, axis=0)
-
-            # Use the new logsumexp_xp helper function
-            log_sum_over_gw_samples = logsumexp_xp(self.xp, log_pdf_values_full, axis=0) - self.xp.log(self.xp.array(len(self.dL_gw_samples), dtype=self.xp.float64))
+            # --- Fully Vectorized Alternative with Redshift Marginalization ---
+            # logger.debug("Using fully vectorized likelihood path with redshift marginalization.")
             
-            # After reduction, if any element in log_sum_over_gw_samples is -self.xp.inf 
-            # (e.g., because its corresponding column in log_pdf_values_full was all -self.xp.inf, 
-            # or because logaddexp.reduce itself resulted in -self.xp.inf due to underflow with very small numbers),
-            # it will correctly propagate.
-            # No specific check for all_inf_columns is strictly needed here because logaddexp.reduce handles it.
+            # Check which galaxies need redshift marginalization
+            needs_marginalization = self.z_err_values >= self.z_err_threshold
             
-            # logger.debug(f"log_sum_over_gw_samples (vectorized) shape: {log_sum_over_gw_samples.shape}, any non-finite: {self.xp.any(~self.xp.isfinite(log_sum_over_gw_samples))}")
-            # Example: Check first 5 values if problematic
+            if not self.xp.any(needs_marginalization):
+                # All galaxies below threshold - use simple vectorized computation
+                try:
+                    log_pdf_values_full = logpdf_normal_xp(
+                        self.xp,
+                        self.dL_gw_samples[:, self.xp.newaxis],
+                        loc=model_d_for_hosts[self.xp.newaxis, :],
+                        scale=sigma_d_val_for_hosts[self.xp.newaxis, :]
+                    ) # Shape: (N_samples, N_hosts)
+                except Exception as e:
+                    return -self.xp.inf
+
+                # Handle potential NaNs by converting them to -self.xp.inf
+                log_pdf_values_full = self.xp.where(self.xp.isnan(log_pdf_values_full), -self.xp.inf, log_pdf_values_full)
+
+                # Use the new logsumexp_xp helper function
+                log_sum_over_gw_samples = logsumexp_xp(self.xp, log_pdf_values_full, axis=0) - self.xp.log(self.xp.array(len(self.dL_gw_samples), dtype=self.xp.float64))
+            
+            else:
+                # Some galaxies need marginalization - implement vectorized quadrature
+                log_sum_over_gw_samples = self.xp.zeros(len(self.z_values))
+                
+                # Process galaxies that don't need marginalization
+                no_marg_mask = ~needs_marginalization
+                if self.xp.any(no_marg_mask):
+                    try:
+                        log_pdf_no_marg = logpdf_normal_xp(
+                            self.xp,
+                            self.dL_gw_samples[:, self.xp.newaxis],
+                            loc=model_d_for_hosts[self.xp.newaxis, no_marg_mask],
+                            scale=sigma_d_val_for_hosts[self.xp.newaxis, no_marg_mask]
+                        )
+                        log_pdf_no_marg = self.xp.where(self.xp.isnan(log_pdf_no_marg), -self.xp.inf, log_pdf_no_marg)
+                        log_sum_no_marg = logsumexp_xp(self.xp, log_pdf_no_marg, axis=0) - self.xp.log(self.xp.array(len(self.dL_gw_samples), dtype=self.xp.float64))
+                        
+                        # Update the results for non-marginalized galaxies
+                        no_marg_indices = self.xp.where(no_marg_mask)[0]
+                        for i, idx in enumerate(no_marg_indices):
+                            log_sum_over_gw_samples = self._update_array_element(log_sum_over_gw_samples, idx, log_sum_no_marg[i])
+                    except Exception:
+                        # Set non-marginalized galaxies to -inf if computation fails
+                        for idx in self.xp.where(no_marg_mask)[0]:
+                            log_sum_over_gw_samples = self._update_array_element(log_sum_over_gw_samples, idx, -self.xp.inf)
+                
+                # Process galaxies that need marginalization
+                marg_indices = self.xp.where(needs_marginalization)[0]
+                for idx in marg_indices:
+                    mu_z = self.z_values[idx]
+                    sigma_z = self.z_err_values[idx]
+                    
+                    # Compute integration bounds
+                    z_min = self.xp.maximum(mu_z - self.z_sigma_range * sigma_z, 1e-6)
+                    z_max = mu_z + self.z_sigma_range * sigma_z
+                    
+                    if z_max <= z_min:
+                        # Fallback to point estimate
+                        try:
+                            log_pdf_point = logpdf_normal_xp(
+                                self.xp,
+                                self.dL_gw_samples,
+                                loc=model_d_for_hosts[idx],
+                                scale=sigma_d_val_for_hosts[idx]
+                            )
+                            if self.xp.any(~self.xp.isfinite(log_pdf_point)):
+                                log_sum_over_gw_samples = self._update_array_element(log_sum_over_gw_samples, idx, -self.xp.inf)
+                            else:
+                                reduced_log_pdf = logsumexp_xp(self.xp, log_pdf_point)
+                                term_val = reduced_log_pdf - self.xp.log(self.xp.array(len(self.dL_gw_samples), dtype=self.xp.float64))
+                                log_sum_over_gw_samples = self._update_array_element(log_sum_over_gw_samples, idx, term_val)
+                        except Exception:
+                            log_sum_over_gw_samples = self._update_array_element(log_sum_over_gw_samples, idx, -self.xp.inf)
+                        continue
+                    
+                    # Vectorized quadrature integration
+                    try:
+                        # Transform quadrature nodes to redshift domain
+                        z_quad = mu_z + self.xp.sqrt(2.0) * sigma_z * self._quad_nodes  # Shape: (n_quad_points,)
+                        
+                        # Filter out negative redshifts
+                        valid_z_mask = z_quad > 0
+                        if not self.xp.any(valid_z_mask):
+                            log_sum_over_gw_samples = self._update_array_element(log_sum_over_gw_samples, idx, -self.xp.inf)
+                            continue
+                        
+                        z_quad_valid = z_quad[valid_z_mask]
+                        quad_weights_valid = self._quad_weights[valid_z_mask]
+                        
+                        # Vectorized distance computation for all quadrature points
+                        # This is the expensive part - we need to compute luminosity distance for each z
+                        model_d_quad = self.xp.array([self._lum_dist_model(z_val, H0) for z_val in z_quad_valid])
+                        
+                        # Check for valid distances
+                        valid_d_mask = (self.xp.isfinite(model_d_quad)) & (model_d_quad > 0)
+                        if not self.xp.any(valid_d_mask):
+                            log_sum_over_gw_samples = self._update_array_element(log_sum_over_gw_samples, idx, -self.xp.inf)
+                            continue
+                        
+                        model_d_quad_valid = model_d_quad[valid_d_mask]
+                        quad_weights_final = quad_weights_valid[valid_d_mask]
+                        
+                        # Compute sigma_d for each quadrature point
+                        sigma_d_quad = self.xp.maximum((model_d_quad_valid / self.c_val) * self.sigma_v, 1e-9)
+                        
+                        # Vectorized likelihood computation across quadrature points
+                        # Shape: (n_gw_samples, n_quad_points_valid)
+                        log_pdf_quad = logpdf_normal_xp(
+                            self.xp,
+                            self.dL_gw_samples[:, self.xp.newaxis],
+                            loc=model_d_quad_valid[self.xp.newaxis, :],
+                            scale=sigma_d_quad[self.xp.newaxis, :]
+                        )
+                        
+                        # Check for finite values
+                        if self.xp.any(~self.xp.isfinite(log_pdf_quad)):
+                            log_pdf_quad = self.xp.where(self.xp.isnan(log_pdf_quad), -self.xp.inf, log_pdf_quad)
+                        
+                        # Sum over GW samples for each quadrature point
+                        log_likelihood_quad = logsumexp_xp(self.xp, log_pdf_quad, axis=0) - self.xp.log(self.xp.array(len(self.dL_gw_samples), dtype=self.xp.float64))
+                        
+                        # Apply quadrature weights and integrate
+                        log_weights_quad = self.xp.log(quad_weights_final / self.xp.sqrt(self.xp.pi))
+                        log_integrand_quad = log_weights_quad + log_likelihood_quad
+                        
+                        # Final integration using logsumexp
+                        log_integrated_prob = logsumexp_xp(self.xp, log_integrand_quad)
+                        log_sum_over_gw_samples = self._update_array_element(log_sum_over_gw_samples, idx, log_integrated_prob)
+                        
+                    except Exception:
+                        # Integration failed - set to -inf
+                        log_sum_over_gw_samples = self._update_array_element(log_sum_over_gw_samples, idx, -self.xp.inf)
+            
+            # Check for any non-finite values in final result
             if self.xp.any(~self.xp.isfinite(log_sum_over_gw_samples)):
-                # logger.debug(f"  Non-finite log_sum_over_gw_samples (vectorized): {log_sum_over_gw_samples[~self.xp.isfinite(log_sum_over_gw_samples)][:5]}")
                 return -self.xp.inf
 
         else:
