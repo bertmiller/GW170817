@@ -1,17 +1,11 @@
 import numpy as np
 import sys
-# from scipy.stats import norm # Replaced by logpdf_normal_xp
 from numpy.polynomial.hermite import hermgauss
-# from scipy.special import logsumexp # Will be replaced by logsumexp_xp
-from astropy.cosmology import FlatLambdaCDM # Removed
-from astropy import units as u # Removed
 import emcee
 import logging
-import cProfile
-import pstats
-import io
-from gwsiren import CONFIG # Keep for default values, but not for backend selection in get_log_likelihood_h0
+from gwsiren import CONFIG
 from gwsiren.backends import get_xp, logpdf_normal_xp, logsumexp_xp, trapz_xp 
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -64,9 +58,8 @@ class H0LogLikelihood:
     """
     def __init__(
         self,
-        xp,  # Added
-        backend_name, # Added
-        # device_name, # Optional to store, but good to receive
+        xp,
+        backend_name,
         dL_gw_samples,
         host_galaxies_z,
         host_galaxies_mass_proxy,
@@ -78,17 +71,88 @@ class H0LogLikelihood:
         h0_max=DEFAULT_H0_PRIOR_MAX,
         alpha_min=DEFAULT_ALPHA_PRIOR_MIN,
         alpha_max=DEFAULT_ALPHA_PRIOR_MAX,
-        use_vectorized_likelihood=False, # Keep for now
-        z_err_threshold=DEFAULT_Z_ERR_THRESHOLD,  # New parameter
-        n_quad_points=DEFAULT_QUAD_POINTS,  # New parameter
-        z_sigma_range=DEFAULT_Z_MARGINALIZATION_SIGMA_RANGE,  # New parameter
+        use_vectorized_likelihood=False,
+        z_err_threshold=DEFAULT_Z_ERR_THRESHOLD,
+        n_quad_points=DEFAULT_QUAD_POINTS,
+        z_sigma_range=DEFAULT_Z_MARGINALIZATION_SIGMA_RANGE,
     ):
+        """Initialize H0LogLikelihood with backend-agnostic computation setup.
+        
+        Args:
+            xp: Backend computation module (numpy or jax.numpy)
+            backend_name: Name of the backend ("numpy" or "jax")
+            dL_gw_samples: GW luminosity distance samples
+            host_galaxies_z: Host galaxy redshifts
+            host_galaxies_mass_proxy: Galaxy mass proxy values
+            host_galaxies_z_err: Redshift uncertainties
+            ... (other parameters as before)
+        """
+        # 1. Store backend configuration
+        self._setup_backend_config(xp, backend_name)
+        
+        # 2. Validate and process input data
+        self._setup_input_data(
+            dL_gw_samples, host_galaxies_z, host_galaxies_mass_proxy, host_galaxies_z_err
+        )
+        
+        # 3. Store computational parameters
+        self._setup_computational_parameters(
+            sigma_v, c_val, omega_m_val, h0_min, h0_max, alpha_min, alpha_max,
+            use_vectorized_likelihood, z_err_threshold, n_quad_points, z_sigma_range
+        )
+        
+        # 4. Initialize quadrature integration
+        self._setup_quadrature_integration(n_quad_points)
+        
+        # 5. Apply backend-specific optimizations
+        self._apply_backend_optimizations()
+
+    def _setup_backend_config(self, xp, backend_name):
+        """Store backend configuration for computation.
+        
+        Args:
+            xp: Backend computation module
+            backend_name: Name of the backend
+        """
         self.xp = xp
         self.backend_name = backend_name
-        # self.device_name = device_name
 
-        # Initial validation using NumPy as it's familiar and robust for this
-        if dL_gw_samples is None or len(np.asarray(dL_gw_samples)) == 0: # Use np for initial check
+    def _setup_input_data(self, dL_gw_samples, host_galaxies_z, host_galaxies_mass_proxy, host_galaxies_z_err):
+        """Validate and convert input data to backend arrays.
+        
+        Args:
+            dL_gw_samples: GW distance samples
+            host_galaxies_z: Host redshifts  
+            host_galaxies_mass_proxy: Mass proxy values
+            host_galaxies_z_err: Redshift uncertainties
+        """
+        # Validate inputs using NumPy for robustness
+        self._validate_input_data(dL_gw_samples, host_galaxies_z, host_galaxies_mass_proxy, host_galaxies_z_err)
+        
+        # Convert to backend arrays
+        self.dL_gw_samples = self.xp.asarray(dL_gw_samples)
+        
+        # Process galaxy data with proper dimensionality handling
+        self.z_values, self.mass_proxy_values, self.z_err_values = self._process_galaxy_data(
+            host_galaxies_z, host_galaxies_mass_proxy, host_galaxies_z_err
+        )
+        
+        # Validate data consistency
+        self._validate_data_consistency()
+
+    def _validate_input_data(self, dL_gw_samples, host_galaxies_z, host_galaxies_mass_proxy, host_galaxies_z_err):
+        """Validate input data before processing.
+        
+        Args:
+            dL_gw_samples: GW distance samples
+            host_galaxies_z: Host redshifts
+            host_galaxies_mass_proxy: Mass proxy values
+            host_galaxies_z_err: Redshift uncertainties
+            
+        Raises:
+            ValueError: If any input is invalid
+        """
+        if dL_gw_samples is None or len(np.asarray(dL_gw_samples)) == 0:
             raise ValueError("dL_gw_samples cannot be None or empty.")
         if host_galaxies_z is None or len(np.asarray(host_galaxies_z)) == 0:
             raise ValueError("host_galaxies_z cannot be None or empty.")
@@ -97,64 +161,115 @@ class H0LogLikelihood:
         if host_galaxies_z_err is None or len(np.asarray(host_galaxies_z_err)) == 0:
             raise ValueError("host_galaxies_z_err cannot be None or empty.")
 
-        # Convert to self.xp arrays after validation
-        self.dL_gw_samples = self.xp.asarray(dL_gw_samples)
-        _z_values_np = np.asarray(host_galaxies_z) # Use np for initial manipulation if needed
-        _mass_proxy_values_np = np.asarray(host_galaxies_mass_proxy, dtype=float)
-        _z_err_values_np = np.asarray(host_galaxies_z_err, dtype=float)
-
-        if _z_values_np.ndim == 0: # if it was a single scalar
-            _z_values_np = np.array([_z_values_np])
-        if _mass_proxy_values_np.ndim == 0:
-            _mass_proxy_values_np = np.array([_mass_proxy_values_np])
-        if _z_err_values_np.ndim == 0:
-            _z_err_values_np = np.array([_z_err_values_np])
+    def _process_galaxy_data(self, host_galaxies_z, host_galaxies_mass_proxy, host_galaxies_z_err):
+        """Process galaxy data ensuring proper dimensionality.
         
-        self.z_values = self.xp.asarray(_z_values_np)
-        self.mass_proxy_values = self.xp.asarray(_mass_proxy_values_np)
-        self.z_err_values = self.xp.asarray(_z_err_values_np)
+        Args:
+            host_galaxies_z: Host redshifts
+            host_galaxies_mass_proxy: Mass proxy values  
+            host_galaxies_z_err: Redshift uncertainties
+            
+        Returns:
+            tuple: (z_values, mass_proxy_values, z_err_values) as backend arrays
+        """
+        # Convert to NumPy first for reliable shape handling
+        z_values_np = np.asarray(host_galaxies_z, dtype=float)
+        mass_proxy_values_np = np.asarray(host_galaxies_mass_proxy, dtype=float)
+        z_err_values_np = np.asarray(host_galaxies_z_err, dtype=float)
 
+        # Ensure at least 1D arrays
+        if z_values_np.ndim == 0:
+            z_values_np = np.array([z_values_np])
+        if mass_proxy_values_np.ndim == 0:
+            mass_proxy_values_np = np.array([mass_proxy_values_np])
+        if z_err_values_np.ndim == 0:
+            z_err_values_np = np.array([z_err_values_np])
+        
+        # Convert to backend arrays
+        z_values = self.xp.asarray(z_values_np)
+        mass_proxy_values = self.xp.asarray(mass_proxy_values_np)
+        z_err_values = self.xp.asarray(z_err_values_np)
+        
+        return z_values, mass_proxy_values, z_err_values
+
+    def _validate_data_consistency(self):
+        """Validate that all galaxy data arrays have consistent lengths.
+        
+        Raises:
+            ValueError: If array lengths are inconsistent
+        """
         if len(self.mass_proxy_values) != len(self.z_values):
             raise ValueError("host_galaxies_mass_proxy and host_galaxies_z must have the same length")
         if len(self.z_err_values) != len(self.z_values):
             raise ValueError("host_galaxies_z_err and host_galaxies_z must have the same length")
+
+    def _setup_computational_parameters(self, sigma_v, c_val, omega_m_val, h0_min, h0_max, 
+                                      alpha_min, alpha_max, use_vectorized_likelihood,
+                                      z_err_threshold, n_quad_points, z_sigma_range):
+        """Store computational parameters for likelihood evaluation.
         
+        Args:
+            sigma_v: Peculiar velocity dispersion
+            c_val: Speed of light
+            omega_m_val: Matter density parameter
+            h0_min, h0_max: H0 prior bounds
+            alpha_min, alpha_max: Alpha prior bounds
+            use_vectorized_likelihood: Vectorization flag
+            z_err_threshold: Redshift error threshold for marginalization
+            n_quad_points: Number of quadrature points
+            z_sigma_range: Range for redshift integration
+        """
+        # Physical parameters
         self.sigma_v = sigma_v
         self.c_val = c_val
         self.omega_m_val = omega_m_val
+        
+        # Prior bounds
         self.h0_min = h0_min
         self.h0_max = h0_max
-        self.use_vectorized_likelihood = use_vectorized_likelihood
         self.alpha_min = alpha_min
         self.alpha_max = alpha_max
+        
+        # Computational settings
+        self.use_vectorized_likelihood = use_vectorized_likelihood
         self.z_err_threshold = z_err_threshold
         self.n_quad_points = n_quad_points
         self.z_sigma_range = z_sigma_range
 
-        _quad_nodes_np, _quad_weights_np = hermgauss(self.n_quad_points) # Still use numpy for this
-        self._quad_nodes = self.xp.asarray(_quad_nodes_np) # Then convert
-        self._quad_weights = self.xp.asarray(_quad_weights_np) # Then convert
+    def _setup_quadrature_integration(self, n_quad_points):
+        """Initialize Gaussian quadrature nodes and weights.
+        
+        Args:
+            n_quad_points: Number of quadrature points
+        """
+        # Generate quadrature nodes and weights using NumPy
+        quad_nodes_np, quad_weights_np = hermgauss(n_quad_points)
+        
+        # Convert to backend arrays
+        self._quad_nodes = self.xp.asarray(quad_nodes_np)
+        self._quad_weights = self.xp.asarray(quad_weights_np)
 
-        # Conditionally JIT compile __call__ if using JAX
+    def _apply_backend_optimizations(self):
+        """Apply backend-specific optimizations like JIT compilation.
+        
+        For JAX backend, this applies JIT compilation to the __call__ method.
+        For NumPy backend, this is a no-op.
+        """
         if self.backend_name == "jax":
-            try:
-                import jax
-                # JIT compile the __call__ method.
-                # JAX will treat 'self' as a static argument by default when JITting a method.
-                # This means that the attributes of 'self' that are JAX arrays will be traced as
-                # dynamic inputs, while Python primitive attributes of 'self' might be treated as static.
-                # This is generally the desired behavior here.
-                # self._original_call = self.__call__ # Optional: keep a reference for debugging
-                self.__call__ = jax.jit(self.__call__)
-                logger.debug(f"H0LogLikelihood.__call__ method has been JIT-compiled for event processing with JAX.")
-            except ImportError:
-                # This case should ideally be caught by get_xp, but as a fallback:
-                logger.error("JAX backend was selected, but JAX module could not be imported for JIT. Likelihood will not be JITted.")
-            except Exception as e:
-                logger.error(f"Error during JAX JIT compilation of __call__: {e}")
-                # Proceed with non-JITted version for JAX if JIT fails
-                logger.warning("Proceeding with non-JITted JAX likelihood due to JIT compilation error.")
+            self._apply_jax_optimizations()
 
+    def _apply_jax_optimizations(self):
+        """Apply JAX-specific optimizations including JIT compilation."""
+        try:
+            import jax
+            # JIT compile the __call__ method for better performance
+            self.__call__ = jax.jit(self.__call__)
+            logger.debug("H0LogLikelihood.__call__ method has been JIT-compiled for JAX backend.")
+        except ImportError:
+            logger.error("JAX backend selected but JAX module not available for JIT compilation.")
+        except Exception as e:
+            logger.error(f"Error during JAX JIT compilation: {e}")
+            logger.warning("Proceeding with non-JITted version due to compilation error.")
 
     def _scalar_comoving_distance_integral(self, z_scalar, N_trapz=200):
         """Computes integral(dz / E(z)) for a single scalar z_scalar using backend-agnostic trapz."""
@@ -810,77 +925,40 @@ def get_log_likelihood_h0(
     z_sigma_range=DEFAULT_Z_MARGINALIZATION_SIGMA_RANGE,
     force_non_vectorized=False,
 ):
-    """
-    Returns an instance of the H0LogLikelihood class, configured for the specified backend.
+    """Create and configure an H0LogLikelihood instance with the specified backend.
+    
+    This is the main factory function for creating likelihood objects. It handles
+    backend selection, memory optimization decisions, and proper configuration.
     
     Args:
-        requested_backend_str (str): The backend to use ("auto", "numpy", "jax").
-        dL_gw_samples (np.array): Luminosity distance samples...
-        host_galaxies_z (np.array): Redshifts of candidate host galaxies (N_hosts,).
-        host_galaxies_mass_proxy (np.array): Positive mass proxy values for the galaxies.
-        host_galaxies_z_err (np.array): Redshift uncertainties for the galaxies.
-        sigma_v (float): Peculiar velocity uncertainty (km/s).
-        c_val (float): Speed of light (km/s).
-        omega_m_val (float): Omega Matter for cosmological calculations.
-        h0_min (float): Minimum value for H0 prior.
-        h0_max (float): Maximum value for H0 prior.
-        alpha_min (float): Minimum value for alpha prior.
-        alpha_max (float): Maximum value for alpha prior.
-
+        requested_backend_str (str): The backend to use ("auto", "numpy", "jax")
+        dL_gw_samples: Gravitational wave luminosity distance samples
+        host_galaxies_z: Redshifts of candidate host galaxies
+        host_galaxies_mass_proxy: Mass proxy values for galaxies
+        host_galaxies_z_err: Redshift uncertainties for galaxies
+        ... (other parameters as before)
+        
     Returns:
-        H0LogLikelihood: An instance of the H0LogLikelihood class.
+        H0LogLikelihood: Configured likelihood instance
     """
-    # At the beginning of the function:
-    xp_module, backend_name, device_name = get_xp(requested_backend_str) # Use the passed string
-
-    # Ensure dL_gw_samples is array-like for len() before passing to H0LogLikelihood
-    # which will convert it to xp_module.asarray()
-    # H0LogLikelihood's __init__ does initial checks with np.asarray for robustness.
-    n_gw_samples = len(np.asarray(dL_gw_samples))
+    # 1. Initialize backend
+    backend_config = _initialize_backend(requested_backend_str)
     
-    # Ensure host_galaxies_z is treated as an array for len()
-    _host_galaxies_z_np_for_len = np.asarray(host_galaxies_z)
-    if _host_galaxies_z_np_for_len.ndim == 0:
-        n_hosts = 1
-    else:
-        n_hosts = len(_host_galaxies_z_np_for_len)
-
-    if backend_name == "jax":
-        # JAX can also be forced to use non-vectorized path for testing/debugging  
-        if force_non_vectorized:
-            should_use_vectorized = False
-            logger.info(f"JAX backend FORCED to non-vectorized for testing/debugging purposes.")
-        else:
-            should_use_vectorized = True # JAX path will be inherently vectorized/optimized
-            logger.info(f"Using JAX backend (on {device_name}). Will use JAX-optimized likelihood path.")
-    else: # numpy backend
-        # Existing memory-based decision for NumPy
-        # n_gw_samples, n_hosts are calculated above this block in the provided snippet
-        current_elements = n_gw_samples * n_hosts
-        # MEMORY_THRESHOLD_BYTES and BYTES_PER_ELEMENT are now module-level constants
-        max_elements_for_vectorization = MEMORY_THRESHOLD_BYTES / BYTES_PER_ELEMENT
-        should_use_vectorized = current_elements <= max_elements_for_vectorization
-        
-        # Override if explicitly requested
-        if force_non_vectorized:
-            should_use_vectorized = False
-            logger.info(f"FORCED non-vectorized likelihood for testing/debugging purposes.")
-        
-        if should_use_vectorized:
-            logger.info(
-                f"Using NumPy backend, VECTORIZED likelihood: N_samples ({n_gw_samples}) * N_hosts ({n_hosts}) = {current_elements} elements. "
-                f"Threshold: {max_elements_for_vectorization:.0f} elements ({MEMORY_THRESHOLD_BYTES / (1024**3):.0f} GB)."
-            )
-        else:
-            logger.info(
-                f"Using NumPy backend, LOOPED likelihood (memory efficient): N_samples ({n_gw_samples}) * N_hosts ({n_hosts}) = {current_elements} elements. "
-                f"{'Forced by force_non_vectorized=True' if force_non_vectorized else f'Exceeds threshold of {max_elements_for_vectorization:.0f} elements ({MEMORY_THRESHOLD_BYTES / (1024**3):.0f} GB).'}."
-            )
-
+    # 2. Analyze data dimensions
+    data_dimensions = _analyze_data_dimensions(dL_gw_samples, host_galaxies_z)
+    
+    # 3. Determine vectorization strategy
+    vectorization_config = _determine_vectorization_strategy(
+        backend_config, data_dimensions, force_non_vectorized
+    )
+    
+    # 4. Log configuration decisions
+    _log_likelihood_configuration(backend_config, data_dimensions, vectorization_config)
+    
+    # 5. Create and return likelihood instance
     return H0LogLikelihood(
-        xp_module, # Pass xp
-        backend_name, # Pass backend_name
-        # device_name, # Pass device_name (optional to store in H0LogLikelihood)
+        backend_config.xp_module,
+        backend_config.backend_name,
         dL_gw_samples,
         host_galaxies_z,
         host_galaxies_mass_proxy,
@@ -892,21 +970,150 @@ def get_log_likelihood_h0(
         h0_max,
         alpha_min,
         alpha_max,
-        use_vectorized_likelihood=should_use_vectorized,
+        use_vectorized_likelihood=vectorization_config.should_use_vectorized,
         z_err_threshold=z_err_threshold,
         n_quad_points=n_quad_points,
         z_sigma_range=z_sigma_range,
     )
 
-# It might be useful to keep get_log_likelihood_h0_vectorized for specific testing,
-# but ensure it also gets the xp context. Or remove if get_log_likelihood_h0 covers all.
-# For now, let's assume it's removed or refactored if kept.
-# For this subtask, I will remove it as get_log_likelihood_h0 now handles backend.
-# def get_log_likelihood_h0_vectorized(...): -> This function is removed.
+# Supporting data classes for cleaner interfaces
+@dataclass
+class BackendConfig:
+    """Configuration for computational backend."""
+    xp_module: object
+    backend_name: str
+    device_name: str
+
+@dataclass  
+class DataDimensions:
+    """Analysis of input data dimensions."""
+    n_gw_samples: int
+    n_hosts: int
+    total_elements: int
+
+@dataclass
+class VectorizationConfig:
+    """Configuration for vectorization strategy."""
+    should_use_vectorized: bool
+    memory_threshold_elements: float
+    force_non_vectorized: bool
+
+def _initialize_backend(requested_backend_str: str) -> BackendConfig:
+    """Initialize and configure the computational backend.
+    
+    Args:
+        requested_backend_str: Backend identifier ("auto", "numpy", "jax")
+        
+    Returns:
+        BackendConfig: Backend configuration object
+    """
+    xp_module, backend_name, device_name = get_xp(requested_backend_str)
+    return BackendConfig(
+        xp_module=xp_module,
+        backend_name=backend_name, 
+        device_name=device_name
+    )
+
+def _analyze_data_dimensions(dL_gw_samples, host_galaxies_z) -> DataDimensions:
+    """Analyze input data dimensions for memory and performance planning.
+    
+    Args:
+        dL_gw_samples: GW distance samples
+        host_galaxies_z: Host galaxy redshifts
+        
+    Returns:
+        DataDimensions: Analysis of data sizes
+    """
+    # Ensure array-like inputs for length calculation
+    n_gw_samples = len(np.asarray(dL_gw_samples))
+    
+    # Handle scalar vs array host redshifts
+    host_z_array = np.asarray(host_galaxies_z)
+    if host_z_array.ndim == 0:
+        n_hosts = 1
+    else:
+        n_hosts = len(host_z_array)
+    
+    total_elements = n_gw_samples * n_hosts
+    
+    return DataDimensions(
+        n_gw_samples=n_gw_samples,
+        n_hosts=n_hosts,
+        total_elements=total_elements
+    )
+
+def _determine_vectorization_strategy(
+    backend_config: BackendConfig, 
+    data_dimensions: DataDimensions,
+    force_non_vectorized: bool
+) -> VectorizationConfig:
+    """Determine optimal vectorization strategy based on backend and data size.
+    
+    Args:
+        backend_config: Backend configuration
+        data_dimensions: Data dimension analysis
+        force_non_vectorized: Override flag to force looped computation
+        
+    Returns:
+        VectorizationConfig: Vectorization strategy configuration
+    """
+    memory_threshold_elements = MEMORY_THRESHOLD_BYTES / BYTES_PER_ELEMENT
+    
+    if backend_config.backend_name == "jax":
+        # JAX benefits from vectorization unless explicitly overridden
+        should_use_vectorized = not force_non_vectorized
+    else:
+        # NumPy: use memory-based decision unless overridden
+        memory_allows_vectorization = data_dimensions.total_elements <= memory_threshold_elements
+        should_use_vectorized = memory_allows_vectorization and not force_non_vectorized
+    
+    return VectorizationConfig(
+        should_use_vectorized=should_use_vectorized,
+        memory_threshold_elements=memory_threshold_elements,
+        force_non_vectorized=force_non_vectorized
+    )
+
+def _log_likelihood_configuration(
+    backend_config: BackendConfig,
+    data_dimensions: DataDimensions, 
+    vectorization_config: VectorizationConfig
+):
+    """Log the likelihood configuration decisions for debugging and monitoring.
+    
+    Args:
+        backend_config: Backend configuration
+        data_dimensions: Data dimensions
+        vectorization_config: Vectorization configuration
+    """
+    if backend_config.backend_name == "jax":
+        if vectorization_config.force_non_vectorized:
+            logger.info(f"JAX backend FORCED to non-vectorized for testing/debugging purposes.")
+        else:
+            logger.info(f"Using JAX backend (on {backend_config.device_name}). Will use JAX-optimized likelihood path.")
+    else:
+        # NumPy backend logging
+        memory_gb = MEMORY_THRESHOLD_BYTES / (1024**3)
+        
+        if vectorization_config.force_non_vectorized:
+            logger.info(f"FORCED non-vectorized likelihood for testing/debugging purposes.")
+        
+        if vectorization_config.should_use_vectorized:
+            logger.info(
+                f"Using NumPy backend, VECTORIZED likelihood: N_samples ({data_dimensions.n_gw_samples}) * "
+                f"N_hosts ({data_dimensions.n_hosts}) = {data_dimensions.total_elements} elements. "
+                f"Threshold: {vectorization_config.memory_threshold_elements:.0f} elements ({memory_gb:.0f} GB)."
+            )
+        else:
+            reason = "Forced by force_non_vectorized=True" if vectorization_config.force_non_vectorized else \
+                    f"Exceeds threshold of {vectorization_config.memory_threshold_elements:.0f} elements ({memory_gb:.0f} GB)"
+            logger.info(
+                f"Using NumPy backend, LOOPED likelihood (memory efficient): N_samples ({data_dimensions.n_gw_samples}) * "
+                f"N_hosts ({data_dimensions.n_hosts}) = {data_dimensions.total_elements} elements. {reason}."
+            )
 
 def run_mcmc_h0(
     log_likelihood_func,
-    event_name,  # For logging
+    event_name,
     n_walkers=DEFAULT_MCMC_N_WALKERS,
     n_dim=DEFAULT_MCMC_N_DIM,
     initial_h0_mean=DEFAULT_MCMC_INITIAL_H0_MEAN,
@@ -916,97 +1123,210 @@ def run_mcmc_h0(
     n_steps=DEFAULT_MCMC_N_STEPS,
     pool=None,
 ):
-    """
-    Runs the MCMC sampler for H0.
-
+    """Run MCMC sampling for H0 and alpha parameters.
+    
+    This function orchestrates the entire MCMC process: initialization,
+    execution, and error handling.
+    
     Args:
-        log_likelihood_func (function): The log likelihood function `log_likelihood(theta)`.
-        event_name (str): Name of the event for logging.
-        n_walkers (int): Number of MCMC walkers.
-        n_dim (int): Number of dimensions (2 for ``H0`` and ``alpha``).
-        initial_h0_mean (float): Mean for initializing ``H0`` walker positions.
-        initial_h0_std (float): Standard deviation for initializing ``H0`` positions.
-        alpha_prior_min (float): Lower bound for ``alpha`` initialization.
-        alpha_prior_max (float): Upper bound for ``alpha`` initialization.
-        n_steps (int): Number of MCMC steps.
-        pool (object, optional): A pool object for parallelization (e.g., from multiprocessing or emcee.interruptible_pool).
-
-    Returns:
-        emcee.EnsembleSampler: The MCMC sampler object after running, or None on failure.
-    """
-    logger.info(
-        f"Running MCMC for H0 and alpha on event {event_name} ({n_steps} steps, {n_walkers} walkers)..."
-    )
-    pos_H0 = initial_h0_mean + initial_h0_std * np.random.randn(n_walkers, 1)
-    pos_alpha = np.random.uniform(alpha_prior_min, alpha_prior_max, size=(n_walkers, 1))
-    walkers0 = np.hstack((pos_H0, pos_alpha))
+        log_likelihood_func: The log likelihood function
+        event_name: Name of the event for logging
+        n_walkers: Number of MCMC walkers
+        n_dim: Number of dimensions (2 for H0 and alpha)
+        initial_h0_mean: Mean for H0 walker initialization
+        initial_h0_std: Standard deviation for H0 initialization
+        alpha_prior_min: Lower bound for alpha initialization
+        alpha_prior_max: Upper bound for alpha initialization  
+        n_steps: Number of MCMC steps
+        pool: Optional pool object for parallelization
         
-    sampler = emcee.EnsembleSampler(
+    Returns:
+        emcee.EnsembleSampler: The sampler object after running, or None on failure
+    """
+    logger.info(f"Running MCMC for H0 and alpha on event {event_name} ({n_steps} steps, {n_walkers} walkers)...")
+    
+    # 1. Initialize walker positions
+    initial_positions = _initialize_mcmc_walkers(
+        n_walkers, initial_h0_mean, initial_h0_std, alpha_prior_min, alpha_prior_max
+    )
+    
+    # 2. Create and configure sampler
+    sampler = _create_mcmc_sampler(n_walkers, n_dim, log_likelihood_func, pool)
+    
+    # 3. Run MCMC with error handling
+    return _execute_mcmc_run(sampler, initial_positions, n_steps, event_name)
+
+def _initialize_mcmc_walkers(n_walkers, h0_mean, h0_std, alpha_min, alpha_max):
+    """Initialize walker positions for MCMC sampling.
+    
+    Args:
+        n_walkers: Number of walkers
+        h0_mean: Mean H0 value for initialization
+        h0_std: Standard deviation for H0 initialization
+        alpha_min: Minimum alpha value
+        alpha_max: Maximum alpha value
+        
+    Returns:
+        np.array: Initial walker positions (n_walkers, 2)
+    """
+    # Initialize H0 positions around the mean
+    pos_H0 = h0_mean + h0_std * np.random.randn(n_walkers, 1)
+    
+    # Initialize alpha positions uniformly within prior range
+    pos_alpha = np.random.uniform(alpha_min, alpha_max, size=(n_walkers, 1))
+    
+    # Combine into full parameter space
+    return np.hstack((pos_H0, pos_alpha))
+
+def _create_mcmc_sampler(n_walkers, n_dim, log_likelihood_func, pool):
+    """Create and configure the MCMC sampler.
+    
+    Args:
+        n_walkers: Number of walkers
+        n_dim: Number of dimensions  
+        log_likelihood_func: Log likelihood function
+        pool: Optional parallelization pool
+        
+    Returns:
+        emcee.EnsembleSampler: Configured sampler
+    """
+    return emcee.EnsembleSampler(
         n_walkers, 
         n_dim, 
         log_likelihood_func, 
         moves=emcee.moves.StretchMove(),
-        pool=pool  # Pass the pool to the sampler
+        pool=pool
     )
+
+def _execute_mcmc_run(sampler, initial_positions, n_steps, event_name):
+    """Execute the MCMC run with comprehensive error handling.
     
+    Args:
+        sampler: Configured MCMC sampler
+        initial_positions: Initial walker positions
+        n_steps: Number of steps to run
+        event_name: Event name for logging
+        
+    Returns:
+        emcee.EnsembleSampler: Sampler after running, or None on failure
+    """
     try:
-        sampler.run_mcmc(walkers0, n_steps, progress=True)
-        logger.info(f"MCMC run completed for {event_name}.")
+        sampler.run_mcmc(initial_positions, n_steps, progress=True)
+        logger.info(f"MCMC run completed successfully for {event_name}.")
         return sampler
+        
     except ValueError as ve:
         logger.error(f"❌ ValueError during MCMC for {event_name}: {ve}")
-        logger.error("  This can happen if the likelihood consistently returns -inf, check priors or input data.")
+        logger.error("  This can happen if the likelihood consistently returns -inf. Check priors or input data.")
         return None
+        
     except Exception as e:
         logger.exception(f"❌ An unexpected error occurred during MCMC for {event_name}: {e}")
         return None
-        
+
 def process_mcmc_samples(sampler, event_name, burnin=DEFAULT_MCMC_BURNIN, thin_by=DEFAULT_MCMC_THIN_BY, n_dim=DEFAULT_MCMC_N_DIM):
-    """
-    Processes MCMC samples: applies burn-in and thinning.
-
+    """Process MCMC samples by applying burn-in, thinning, and validation.
+    
     Args:
-        sampler (emcee.EnsembleSampler): The MCMC sampler object after running.
-        event_name (str): Name of the event for logging.
-        burnin (int): Number of burn-in steps to discard.
-        thin_by (int): Factor to thin the samples by.
-        n_dim (int): Expected number of dimensions in the chain.
-
+        sampler: MCMC sampler object after running
+        event_name: Name of the event for logging  
+        burnin: Number of burn-in steps to discard
+        thin_by: Factor to thin the samples by
+        n_dim: Expected number of dimensions in the chain
+        
     Returns:
-        np.array: Flattened array of H0 samples after burn-in and thinning, or None if processing fails.
+        np.array: Processed samples, or None if processing fails
     """
     if sampler is None:
         logger.warning(f"⚠️ Sampler object is None for {event_name}. Cannot process MCMC samples.")
         return None
 
     logger.info(f"Processing MCMC samples for {event_name} (burn-in: {burnin}, thin: {thin_by})...")
+    
     try:
-        # get_chain shape: (n_steps, n_walkers, n_dim)
-        # flat=True gives shape: (n_steps_after_discard_and_thin * n_walkers, n_dim)
-        flat_samples = sampler.get_chain(discard=burnin, thin=thin_by, flat=True)
-        
-        if flat_samples.shape[0] == 0:
-            logger.warning(f"⚠️ MCMC for {event_name} resulted in NO valid samples after burn-in ({burnin}) and thinning ({thin_by}).")
-            logger.warning(f"  Original chain length before discard: {sampler.get_chain().shape[0]}")
+        # 1. Extract and validate raw samples
+        raw_samples = _extract_raw_samples(sampler, burnin, thin_by)
+        if raw_samples is None:
             return None
-
-        if n_dim == 1 and flat_samples.ndim == 2 and flat_samples.shape[1] == 1:
-             processed_samples = flat_samples[:,0] # Extract the single parameter (H0)
-        elif n_dim > 1 and flat_samples.ndim == 2 and flat_samples.shape[1] == n_dim:
-            logger.info(f"  Note: MCMC had {n_dim} dimensions. Returning all dimensions after processing.")
-            processed_samples = flat_samples # Keep as is if multi-dimensional and correctly shaped
-        elif flat_samples.ndim == 1 and n_dim ==1: # Already flat and 1D
-            processed_samples = flat_samples
-        else:
-            logger.warning(f"⚠️ Unexpected shape for flat_samples: {flat_samples.shape}. Expected ({'*', n_dim}). Cannot safely extract H0.")
+            
+        # 2. Validate sample dimensions and content
+        if not _validate_sample_dimensions(raw_samples, event_name, sampler):
             return None
-
-        logger.info(f"  Successfully processed MCMC samples for {event_name}. Number of samples: {len(processed_samples)}.")
-        return processed_samples
+            
+        # 3. Format samples according to expected dimensions
+        return _format_processed_samples(raw_samples, n_dim, event_name)
         
     except Exception as e:
         logger.exception(f"❌ Error processing MCMC chain for {event_name}: {e}")
         return None
+
+def _extract_raw_samples(sampler, burnin, thin_by):
+    """Extract raw samples from sampler with burn-in and thinning.
+    
+    Args:
+        sampler: MCMC sampler object
+        burnin: Number of burn-in steps
+        thin_by: Thinning factor
+        
+    Returns:
+        np.array: Raw flattened samples, or None if extraction fails
+    """
+    # Extract samples: shape (n_steps, n_walkers, n_dim) -> (n_samples_total, n_dim)
+    flat_samples = sampler.get_chain(discard=burnin, thin=thin_by, flat=True)
+    return flat_samples
+
+def _validate_sample_dimensions(samples, event_name, sampler):
+    """Validate that extracted samples have reasonable dimensions.
+    
+    Args:
+        samples: Extracted samples array
+        event_name: Event name for logging
+        sampler: Original sampler for diagnostics
+        
+    Returns:
+        bool: True if samples are valid, False otherwise
+    """
+    if samples.shape[0] == 0:
+        original_length = sampler.get_chain().shape[0]
+        logger.warning(
+            f"⚠️ MCMC for {event_name} resulted in NO valid samples after burn-in and thinning."
+        )
+        logger.warning(f"  Original chain length before discard: {original_length}")
+        return False
+    return True
+
+def _format_processed_samples(samples, expected_n_dim, event_name):
+    """Format processed samples according to expected dimensions.
+    
+    Args:
+        samples: Raw processed samples
+        expected_n_dim: Expected number of dimensions
+        event_name: Event name for logging
+        
+    Returns:
+        np.array: Properly formatted samples, or None if formatting fails
+    """
+    # Handle different dimensional cases
+    if expected_n_dim == 1 and samples.ndim == 2 and samples.shape[1] == 1:
+        # Single parameter case - extract the column
+        processed_samples = samples[:, 0]
+    elif expected_n_dim > 1 and samples.ndim == 2 and samples.shape[1] == expected_n_dim:
+        # Multi-dimensional case - keep as is
+        logger.info(f"  Note: MCMC had {expected_n_dim} dimensions. Returning all dimensions after processing.")
+        processed_samples = samples
+    elif samples.ndim == 1 and expected_n_dim == 1:
+        # Already 1D for single parameter
+        processed_samples = samples
+    else:
+        # Unexpected shape
+        logger.warning(
+            f"⚠️ Unexpected shape for flat_samples: {samples.shape}. Expected ({'*', expected_n_dim}). "
+            f"Cannot safely extract parameters."
+        )
+        return None
+
+    logger.info(f"  Successfully processed MCMC samples for {event_name}. Number of samples: {len(processed_samples)}.")
+    return processed_samples
 
 def profile_likelihood_call(log_like_func_to_profile, h0_values_to_test, n_calls=10):
     """Helper function to profile the likelihood call multiple times."""
@@ -1014,270 +1334,3 @@ def profile_likelihood_call(log_like_func_to_profile, h0_values_to_test, n_calls
     for h0_val in h0_values_to_test:
         for _ in range(n_calls):
             _ = log_like_func_to_profile([h0_val]) # Call the likelihood
-
-if __name__ == '__main__':
-    # Configure basic logging for standalone testing of this module
-    logging.basicConfig(
-        level=logging.INFO, # Changed from DEBUG to INFO
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[logging.StreamHandler(sys.stdout)]
-    )
-    logger.info("--- Testing h0_mcmc_analyzer.py ---")
-    
-    # Mock data for testing likelihood and MCMC
-    mock_event = "GW_MOCK_H0_TEST"
-    mock_dL_gw = np.random.normal(loc=700, scale=70, size=1000) # Mpc
-    mock_host_zs = np.array([0.1, 0.12, 0.09, 0.15, 0.11] * 20) # N_hosts = 100
-
-    h0_test_values_for_profiling = [65.0, 70.0, 75.0]
-
-    # 1. Test get_log_likelihood_h0
-    logger.info("\nTest 1: Getting log likelihood function...")
-    # Determine backend for testing - e.g. use "auto" or a specific one like "numpy"
-    test_backend_choice = "auto" # Or "numpy", "jax"
-    # If using "auto", it might pick JAX if available. For more controlled tests, specify "numpy" or "jax".
-    # test_backend_choice = CONFIG.computation.backend # Or read from config for test consistency
-    
-    try:
-        # Ensure mock data for mass_proxy and z_err are provided
-        mock_mass_proxy = np.random.rand(len(mock_host_zs)) * 100 + 1 # Example positive values
-        mock_z_err = np.random.rand(len(mock_host_zs)) * 0.01 # Example small errors
-
-        log_like_func = get_log_likelihood_h0(
-            test_backend_choice, # Pass the chosen backend string for testing
-            mock_dL_gw, 
-            mock_host_zs,
-            mock_mass_proxy,
-            mock_z_err
-        )
-        # Test the likelihood function with some H0 values
-        h0_test_values = [60.0, 70.0, 80.0]
-        logger.info(f"  Log likelihood values for H0={h0_test_values} using backend '{log_like_func.backend_name}':")
-        for h0_val in h0_test_values:
-            # Assuming alpha is the second parameter, provide a default like 0.0
-            ll = log_like_func([h0_val, 0.0]) 
-            logger.info(f"    H0 = {h0_val:.1f}, alpha = 0.0: logL = {ll:.2f}")
-            # Using xp.isfinite from the likelihood's own backend context
-            assert log_like_func.xp.isfinite(ll), f"LogL not finite for H0={h0_val}"
-        logger.info("  Log likelihood function seems operational.")
-
-        # Test prior boundaries
-        ll_low = log_like_func([DEFAULT_H0_PRIOR_MIN - 1, 0.0])
-        assert ll_low == -log_like_func.xp.inf, "Prior min boundary failed"
-        ll_high = log_like_func([DEFAULT_H0_PRIOR_MAX + 1, 0.0])
-        assert ll_high == -log_like_func.xp.inf, "Prior max boundary failed"
-        logger.info(f"  Prior boundaries (H0_min={DEFAULT_H0_PRIOR_MIN}, H0_max={DEFAULT_H0_PRIOR_MAX}) correctly applied.")
-
-        ll_dynamic = log_like_func([70.0, 0.0]) # Pass alpha too
-        logger.info(f"  Dynamically chosen path (backend: {log_like_func.backend_name if hasattr(log_like_func, 'backend_name') else 'N/A'}) gives logL={ll_dynamic:.2f}")
-
-
-    except ValueError as ve:
-        logger.error(f"  Error in Test 1 (get_log_likelihood_h0): {ve}", exc_info=True)
-    except Exception as e:
-        logger.exception(f"  Unexpected error in Test 1 (get_log_likelihood_h0): {e}", exc_info=True)
-
-    # 2. Test run_mcmc_h0 and process_mcmc_samples
-    logger.info("\nTest 2: Running MCMC and processing samples...")
-    # Reduce steps for faster testing
-    test_mcmc_steps = 200
-    test_mcmc_burnin = 50
-    test_mcmc_walkers = 8 # Fewer walkers for test
-
-    # Get the backend once for the test script main section, if still needed outside get_log_likelihood_h0
-    # xp_test, backend_name_test, device_name_test = get_xp(test_backend_choice) 
-    # logger.info(f"--- Main test script using backend: {backend_name_test} on {device_name_test} for general tests ---")
-
-
-    if 'log_like_func' in locals(): # Proceed if likelihood function was created
-        try: # Add try block here
-            # log_like_func is already obtained using test_backend_choice
-            # try:
-                # log_like_func = get_log_likelihood_h0( # This would re-create it, not needed if already created above
-                #     test_backend_choice,
-                #     mock_dL_gw, 
-                #     mock_host_zs, 
-                #     mock_mass_proxy, 
-                #     mock_z_err
-                # )
-                # logger.info(f"  Log likelihood function re-obtained with backend: {log_like_func.backend_name if hasattr(log_like_func, 'backend_name') else 'N/A'}")
-
-            sampler = run_mcmc_h0(
-                    log_like_func,
-                    mock_event,
-                    n_walkers=test_mcmc_walkers,
-                    n_steps=test_mcmc_steps
-                )
-
-            if sampler:
-                    # Process MCMC samples (this function remains largely numpy-based for now from emcee output)
-                    h0_samples_processed = process_mcmc_samples(
-                        sampler,
-                        mock_event,
-                        burnin=test_mcmc_burnin,
-                        thin_by=2 # Small thin factor for test
-                    )
-                    if h0_samples_processed is not None and len(h0_samples_processed) > 0:
-                        logger.info(f"  Successfully ran MCMC and processed samples for {mock_event}.")
-                        logger.info(f"  Number of H0 samples obtained: {len(h0_samples_processed)}")
-                        # np.mean and np.std are fine here as h0_samples_processed is a NumPy array from emcee
-                        logger.info(f"  H0 mean: {np.mean(h0_samples_processed[:,0]):.2f}, H0 std: {np.std(h0_samples_processed[:,0]):.2f}")
-                        if h0_samples_processed.shape[1] > 1:
-                             logger.info(f"  Alpha mean: {np.mean(h0_samples_processed[:,1]):.2f}, Alpha std: {np.std(h0_samples_processed[:,1]):.2f}")
-
-                    elif h0_samples_processed is not None and len(h0_samples_processed) == 0:
-                        logger.warning("  MCMC processing resulted in zero samples. Check burn-in/thinning or chain length.")
-                    else:
-                        logger.error("  MCMC processing failed to return valid samples.")
-            else:
-                    logger.error("  MCMC run failed or returned no sampler. Cannot test processing.")
-        except Exception as e_mcmc_test: # This except now correctly pairs with the try above
-            logger.exception(f"  Error during MCMC test setup or execution with new backend logic: {e_mcmc_test}")
-
-    else:
-        logger.error("  Log likelihood function (log_like_func) not available. Skipping MCMC run and processing tests.")
-
-
-    # Test with problematic inputs for get_log_likelihood_h0
-    logger.info("\nTest 3: Edge cases for get_log_likelihood_h0")
-    try:
-        get_log_likelihood_h0(None, mock_host_zs, np.ones_like(mock_host_zs), np.full_like(mock_host_zs, 0.001))
-    except ValueError as e:
-        logger.info(f"  Correctly caught error for None dL samples: {e}")
-    try:
-        get_log_likelihood_h0(mock_dL_gw, [], [], [])
-    except ValueError as e:
-        logger.info(f"  Correctly caught error for empty host_zs: {e}")
-
-    # 4. Profiling Section - This will need careful adaptation for xp
-    logger.info("\nTest 4: Profiling the __call__ method...")
-    if 'log_like_func' in locals() and hasattr(log_like_func, 'xp'):
-        
-        # To profile both paths (numpy-looped, numpy-vectorized, jax), we need to ensure
-        # we can create instances of H0LogLikelihood with specific backends and vectorization modes.
-        
-        # Numpy Looped
-        xp_numpy, _, _ = get_xp("numpy")
-        log_like_numpy_looped = H0LogLikelihood(
-            xp_numpy, "numpy", mock_dL_gw, mock_host_zs, np.ones_like(mock_host_zs), np.full_like(mock_host_zs, 0.001),
-            use_vectorized_likelihood=False
-        )
-        logger.info("Profiling NumPy Looped Likelihood...")
-        pr_np_loop = cProfile.Profile()
-        pr_np_loop.enable()
-        profile_likelihood_call(log_like_numpy_looped, h0_test_values_for_profiling, n_calls=5)
-        pr_np_loop.disable()
-        s_np_loop = io.StringIO()
-        pstats.Stats(pr_np_loop, stream=s_np_loop).sort_stats('cumulative').print_stats(30)
-        logger.info("\n--- cProfile results for NumPy Looped Likelihood ---")
-        print(s_np_loop.getvalue())
-
-        # Numpy Vectorized
-        log_like_numpy_vec = H0LogLikelihood(
-            xp_numpy, "numpy", mock_dL_gw, mock_host_zs, np.ones_like(mock_host_zs), np.full_like(mock_host_zs, 0.001),
-            use_vectorized_likelihood=True # This should be chosen if data size allows by get_log_likelihood_h0
-        )
-        logger.info("Profiling NumPy Vectorized Likelihood...")
-        pr_np_vec = cProfile.Profile()
-        pr_np_vec.enable()
-        profile_likelihood_call(log_like_numpy_vec, h0_test_values_for_profiling, n_calls=5)
-        pr_np_vec.disable()
-        s_np_vec = io.StringIO()
-        pstats.Stats(pr_np_vec, stream=s_np_vec).sort_stats('cumulative').print_stats(30)
-        logger.info("\n--- cProfile results for NumPy Vectorized Likelihood ---")
-        print(s_np_vec.getvalue())
-
-        # JAX (if available)
-        try:
-            xp_jax, _, _ = get_xp("jax")
-            # For JAX, use_vectorized_likelihood is effectively True
-            log_like_jax = H0LogLikelihood(
-                xp_jax, "jax", mock_dL_gw, mock_host_zs, np.ones_like(mock_host_zs), np.full_like(mock_host_zs, 0.001),
-                use_vectorized_likelihood=True 
-            )
-            logger.info("Profiling JAX Likelihood...")
-            # JAX specific: compile call for fair comparison if needed
-            # _ = log_like_jax([h0_test_values_for_profiling[0]]).block_until_ready() # JIT compile
-            
-            pr_jax = cProfile.Profile()
-            pr_jax.enable()
-            profile_likelihood_call(log_like_jax, h0_test_values_for_profiling, n_calls=5)
-            # for h0_val in h0_test_values_for_profiling: # Manual loop for block_until_ready
-            #    for _ in range(5):
-            #        _ = log_like_jax([h0_val]).block_until_ready()
-
-            pr_jax.disable()
-            s_jax = io.StringIO()
-            pstats.Stats(pr_jax, stream=s_jax).sort_stats('cumulative').print_stats(30)
-            logger.info("\n--- cProfile results for JAX Likelihood ---")
-            print(s_jax.getvalue())
-        except Exception as e_jax_profile:
-            logger.warning(f"Could not profile JAX backend (likely not available or error during setup): {e_jax_profile}")
-            
-    else:
-        logger.error("  Log likelihood function not available for profiling with xp context.")
-
-    # 5. Timeit Benchmarking Section - Adapt similarly to profiling
-    logger.info("\nTest 5: Benchmarking with timeit...")
-    if 'log_like_numpy_looped' in locals() and 'log_like_numpy_vec' in locals(): # Check if numpy versions were created
-        import timeit
-        
-        n_timeit_runs = 100
-        n_timeit_repeat = 5
-        timeit_globals_np_loop = {"func": log_like_numpy_looped, "val": [70.0, 0.0]}
-        timeit_globals_np_vec = {"func": log_like_numpy_vec, "val": [70.0, 0.0]}
-
-        logger.info(f"  Timing NumPy looped version ({n_timeit_runs} calls, {n_timeit_repeat} repeats)...")
-        looped_times = timeit.repeat("func(val)", globals=timeit_globals_np_loop, number=n_timeit_runs, repeat=n_timeit_repeat)
-        min_looped_time = min(looped_times) / n_timeit_runs
-        logger.info(f"    Min time per call (NumPy looped): {min_looped_time*1e6:.2f} microseconds")
-
-        logger.info(f"  Timing NumPy vectorized version ({n_timeit_runs} calls, {n_timeit_repeat} repeats)...")
-        vectorized_times = timeit.repeat("func(val)", globals=timeit_globals_np_vec, number=n_timeit_runs, repeat=n_timeit_repeat)
-        min_vectorized_time = min(vectorized_times) / n_timeit_runs
-        logger.info(f"    Min time per call (NumPy vectorized): {min_vectorized_time*1e6:.2f} microseconds")
-        
-        if min_vectorized_time < min_looped_time:
-            logger.info(f"    NumPy Vectorized is approx {min_looped_time/min_vectorized_time:.2f}x faster.")
-        else:
-            logger.info(f"    NumPy Looped is approx {min_vectorized_time/min_looped_time:.2f}x faster (or similar speed).")
-
-        if 'log_like_jax' in locals():
-            # JAX timeit needs careful handling of compilation
-            # It's often better to benchmark JAX by calling a jitted function multiple times
-            # and using block_until_ready(). timeit might not give the full picture due to JIT overhead on first calls.
-            # For a simple comparison here:
-            from functools import partial
-            
-            @partial(xp_jax.jit, static_argnums=(0,))
-            def jax_call_for_timeit(func_obj, val_jax):
-                return func_obj(val_jax)
-
-            # Warm-up / JIT compilation
-            # test_val_jax = xp_jax.array([70.0, 0.0])
-            # _ = jax_call_for_timeit(log_like_jax, test_val_jax).block_until_ready()
-            
-            # timeit_globals_jax = {"func_jitted": partial(jax_call_for_timeit, log_like_jax) , "val_j": test_val_jax}
-            # logger.info(f"  Timing JAX version ({n_timeit_runs} calls, {n_timeit_repeat} repeats)...")
-            # jax_times = timeit.repeat("func_jitted(val_j).block_until_ready()", globals=timeit_globals_jax, number=n_timeit_runs, repeat=n_timeit_repeat)
-            # min_jax_time = min(jax_times) / n_timeit_runs
-            # logger.info(f"    Min time per call (JAX): {min_jax_time*1e6:.2f} microseconds")
-            # if min_jax_time < min_vectorized_time:
-            #    logger.info(f"    JAX is approx {min_vectorized_time/min_jax_time:.2f}x faster than NumPy vectorized.")
-            # else:
-            #    logger.info(f"    NumPy Vectorized is approx {min_jax_time/min_vectorized_time:.2f}x faster than JAX (or similar speed).")
-            logger.info("    (JAX timeit requires careful setup with JIT compilation and block_until_ready, simplified here)")
-
-
-    else:
-        logger.error("  Log likelihood functions (NumPy versions) not available for timeit benchmarking.")
-
-    # 6. Profiling Full MCMC Run - This would also need adaptation
-    logger.info("\nTest 6: Profiling full MCMC runs (SKIPPING for this refactoring stage due to complexity of adapting MCMC part)...")
-    # The MCMC part uses emcee, which expects numpy arrays for initial positions.
-    # The log_likelihood_func passed to emcee would now be xp-aware.
-    # If JAX is used, emcee might run slower if not integrated carefully (e.g., passing JAX arrays directly).
-    # This requires more thought on how emcee interacts with JAX functions (e.g. `jax.experimental.host_callback`).
-    # For now, the main goal is to make the likelihood function itself backend-agnostic.
-
-    logger.info("\n--- Finished testing h0_mcmc_analyzer.py (with backend adaptations) ---")
