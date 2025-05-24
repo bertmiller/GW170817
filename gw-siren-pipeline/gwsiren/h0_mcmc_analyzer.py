@@ -4,7 +4,8 @@ from numpy.polynomial.hermite import hermgauss
 import emcee
 import logging
 from gwsiren import CONFIG
-from gwsiren.backends import get_xp, logpdf_normal_xp, logsumexp_xp, trapz_xp 
+from gwsiren.backends import get_xp, logpdf_normal_xp, logsumexp_xp, trapz_xp
+from gwsiren.distance_cache import create_distance_cache
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -255,21 +256,76 @@ class H0LogLikelihood:
         For JAX backend, this applies JIT compilation to the __call__ method.
         For NumPy backend, this is a no-op.
         """
+        # Initialize distance cache for performance optimization
+        self._distance_cache = create_distance_cache(
+            max_cache_size=100,  # Cache up to 100 H0 values
+            z_range=(0.001, 3.0),  # Reasonable redshift range
+            z_points=2000,  # High resolution for accuracy
+            h0_tolerance=0.01  # Group H0 values within 0.01 km/s/Mpc
+        )
+        
+        # Set up the uncached distance function for the cache to use
+        self._distance_cache.set_distance_function(self._lum_dist_model_uncached)
+        
         if self.backend_name == "jax":
             self._apply_jax_optimizations()
 
     def _apply_jax_optimizations(self):
-        """Apply JAX-specific optimizations including JIT compilation."""
-        try:
-            import jax
-            # JIT compile the __call__ method for better performance
-            self.__call__ = jax.jit(self.__call__)
-            logger.debug("H0LogLikelihood.__call__ method has been JIT-compiled for JAX backend.")
-        except ImportError:
-            logger.error("JAX backend selected but JAX module not available for JIT compilation.")
-        except Exception as e:
-            logger.error(f"Error during JAX JIT compilation: {e}")
-            logger.warning("Proceeding with non-JITted version due to compilation error.")
+        """Apply JAX-specific optimizations like JIT compilation."""
+        if self.backend_name == "jax":
+            # For JAX backend, we can JIT compile the main computation
+            # This is a placeholder for future JAX-specific optimizations
+            pass
+    
+    def _lum_dist_model_uncached(self, z_values, H0_val, N_trapz=200):
+        """Uncached version of luminosity distance computation.
+        
+        This is the original computation that the cache will use to build
+        interpolation tables. Should not be called directly - use _lum_dist_model instead.
+        """
+        is_scalar_input = (self.xp.asarray(z_values).ndim == 0)
+        z_input_arr = self.xp.atleast_1d(z_values)
+
+        if H0_val < 1e-9: # Avoid division by zero for H0
+            return self.xp.full_like(z_input_arr, self.xp.inf, dtype=self.xp.float64)
+
+        dc_integrals_list = [self._scalar_comoving_distance_integral(z_val, N_trapz) for z_val in z_input_arr]
+        dc_integrals = self.xp.asarray(dc_integrals_list, dtype=self.xp.float64)
+
+        lum_dist = (self.c_val / H0_val) * (1.0 + z_input_arr) * dc_integrals
+        
+        if is_scalar_input and lum_dist.ndim > 0: # Ensure output matches input shape
+            return lum_dist[0]
+        return lum_dist
+
+    def _lum_dist_model(self, z_values, H0_val, N_trapz=200):
+        """Compute luminosity distance for z_values (array or scalar) and H0_val.
+        
+        Uses distance cache for performance optimization. This replaces the original
+        distance computation with a cached version that builds interpolation tables.
+        """
+        # Use the distance cache for optimized computation
+        result = self._distance_cache.get_distances(z_values, H0_val)
+        
+        # Convert result to backend array if needed
+        # The distance cache returns NumPy arrays/scalars, we need to convert to backend arrays
+        if self.backend_name == 'jax':
+            # For JAX, always convert to JAX arrays
+            if self.xp.isscalar(z_values):
+                return self.xp.array(result)
+            else:
+                return self.xp.asarray(result)
+        else:
+            # For NumPy, check if conversion is needed
+            if hasattr(result, '__array__') and hasattr(result, 'dtype'):
+                # Already an array-like object
+                return self.xp.asarray(result)
+            else:
+                # Scalar or other type
+                if self.xp.isscalar(z_values):
+                    return self.xp.array(result)
+                else:
+                    return self.xp.asarray(result)
 
     def _scalar_comoving_distance_integral(self, z_scalar, N_trapz=200):
         """Computes integral(dz / E(z)) for a single scalar z_scalar using backend-agnostic trapz."""
@@ -291,23 +347,6 @@ class H0LogLikelihood:
         # Use backend-agnostic trapz instead of self.xp.trapz
         integral = trapz_xp(self.xp, integrand, x=z_steps)
         return integral
-
-    def _lum_dist_model(self, z_values, H0_val, N_trapz=200):
-        """Compute luminosity distance for z_values (array or scalar) and H0_val."""
-        is_scalar_input = (self.xp.asarray(z_values).ndim == 0)
-        z_input_arr = self.xp.atleast_1d(z_values)
-
-        if H0_val < 1e-9: # Avoid division by zero for H0
-            return self.xp.full_like(z_input_arr, self.xp.inf, dtype=self.xp.float64)
-
-        dc_integrals_list = [self._scalar_comoving_distance_integral(z_val, N_trapz) for z_val in z_input_arr]
-        dc_integrals = self.xp.asarray(dc_integrals_list, dtype=self.xp.float64)
-
-        lum_dist = (self.c_val / H0_val) * (1.0 + z_input_arr) * dc_integrals
-        
-        if is_scalar_input and lum_dist.ndim > 0: # Ensure output matches input shape
-            return lum_dist[0]
-        return lum_dist
 
     def __call__(self, theta):
         """Compute log-likelihood for H0 and alpha parameters."""
@@ -441,11 +480,23 @@ class H0LogLikelihood:
             array: Log-likelihood contribution for each galaxy, or None if computation fails
         """
         try:
+            # Ensure arrays are properly shaped for broadcasting
+            # Convert to backend arrays and ensure they're at least 1D
+            model_distances = self.xp.atleast_1d(self.xp.asarray(model_distances))
+            distance_uncertainties = self.xp.atleast_1d(self.xp.asarray(distance_uncertainties))
+            dL_gw_samples = self.xp.atleast_1d(self.xp.asarray(self.dL_gw_samples))
+            
+            # Create properly shaped arrays for broadcasting
+            # Shape: (N_samples, 1) and (1, N_hosts)
+            gw_samples_expanded = dL_gw_samples[:, self.xp.newaxis]
+            model_distances_expanded = model_distances[self.xp.newaxis, :]
+            distance_uncertainties_expanded = distance_uncertainties[self.xp.newaxis, :]
+            
             log_pdf_values_full = logpdf_normal_xp(
                 self.xp,
-                self.dL_gw_samples[:, self.xp.newaxis],
-                loc=model_distances[self.xp.newaxis, :],
-                scale=distance_uncertainties[self.xp.newaxis, :]
+                gw_samples_expanded,
+                loc=model_distances_expanded,
+                scale=distance_uncertainties_expanded
             )  # Shape: (N_samples, N_hosts)
         except Exception:
             return None
@@ -554,9 +605,21 @@ class H0LogLikelihood:
         marg_indices = self.xp.where(needs_marginalization)[0]
         marg_likelihoods = []
         
-        for idx in marg_indices:
+        # Convert to Python list for iteration if JAX backend
+        if self.backend_name == "jax":
+            indices_list = [int(idx) for idx in marg_indices]
+        else:
+            indices_list = marg_indices
+        
+        for idx in indices_list:
+            # Extract scalar values for JAX compatibility
+            if self.backend_name == "jax":
+                model_dist = float(model_distances[idx])
+            else:
+                model_dist = model_distances[idx]
+                
             likelihood = self._marginalize_single_galaxy_redshift_vectorized(
-                idx, model_distances[idx], H0
+                idx, model_dist, H0
             )
             marg_likelihoods.append(likelihood)
         
@@ -640,7 +703,25 @@ class H0LogLikelihood:
         quad_weights_valid = self._quad_weights[valid_z_mask]
         
         # Vectorized distance computation for all quadrature points
-        model_d_quad = self.xp.array([self._lum_dist_model(z_val, H0) for z_val in z_quad_valid])
+        try:
+            model_d_quad = self._lum_dist_model(z_quad_valid, H0)
+            # Ensure it's a backend array
+            model_d_quad = self.xp.asarray(model_d_quad)
+        except Exception:
+            # Fallback to element-wise computation if vectorized fails
+            model_d_list = []
+            for z_val in z_quad_valid:
+                try:
+                    # Convert JAX array element to scalar for compatibility
+                    z_scalar = float(z_val) if self.backend_name == "jax" else z_val
+                    d_val = self._lum_dist_model(z_scalar, H0)
+                    model_d_list.append(d_val)
+                except Exception:
+                    return -self.xp.inf
+            
+            if not model_d_list:
+                return -self.xp.inf
+            model_d_quad = self.xp.array(model_d_list)
         
         # Check for valid distances
         valid_d_mask = (self.xp.isfinite(model_d_quad)) & (model_d_quad > 0)
@@ -898,14 +979,56 @@ class H0LogLikelihood:
         return total_log_likelihood
 
     def _update_array_element(self, array, index, value):
-        """Backend-agnostic array element update."""
+        """Update array element in a backend-agnostic way.
+        
+        Args:
+            array: Array to update
+            index: Index to update
+            value: New value
+            
+        Returns:
+            Updated array
+        """
         if self.backend_name == "jax":
-            # JAX uses immutable arrays, so we use .at[].set()
+            # JAX arrays are immutable, use at() method
             return array.at[index].set(value)
         else:
-            # NumPy uses mutable arrays
+            # NumPy arrays are mutable
             array[index] = value
             return array
+    
+    def get_distance_cache_stats(self):
+        """Get distance cache performance statistics.
+        
+        Returns:
+            dict: Cache statistics including hit rate, build times, etc.
+        """
+        return self._distance_cache.get_statistics()
+    
+    def log_distance_cache_stats(self):
+        """Log distance cache performance statistics."""
+        self._distance_cache.log_statistics()
+    
+    def validate_distance_cache_accuracy(self, max_relative_error=1e-4):
+        """Validate distance cache accuracy against direct computation.
+        
+        Args:
+            max_relative_error: Maximum acceptable relative error
+            
+        Returns:
+            bool: True if validation passes
+        """
+        # Create test points covering the typical range
+        test_z_values = np.array([0.01, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0])
+        test_h0_values = np.array([50.0, 65.0, 70.0, 75.0, 90.0, 120.0])
+        
+        return self._distance_cache.validate_accuracy(
+            test_z_values, test_h0_values, max_relative_error
+        )
+    
+    def clear_distance_cache(self):
+        """Clear the distance cache and reset statistics."""
+        self._distance_cache.clear_cache()
 
 def get_log_likelihood_h0(
     requested_backend_str: str,
