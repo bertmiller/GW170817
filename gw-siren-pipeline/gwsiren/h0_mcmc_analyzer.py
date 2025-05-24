@@ -195,306 +195,586 @@ class H0LogLikelihood:
         return lum_dist
 
     def __call__(self, theta):
-        H0 = theta[0]
-        # logger.debug(f"H0LogLikelihood.__call__ with H0 = {H0}, vectorized = {self.use_vectorized_likelihood}")
-
-        if not (self.h0_min <= H0 <= self.h0_max):
-            # logger.debug(f"H0 = {H0} is outside prior range ({self.h0_min}, {self.h0_max}). Returning -inf.")
-            return -self.xp.inf
-
-        try: 
-            model_d_for_hosts = self._lum_dist_model(self.z_values, H0) # self.z_values is now xp array
-            # logger.debug(f"model_d_for_hosts (first 5 if available): {model_d_for_hosts[:min(5, len(model_d_for_hosts))]}") 
-            if self.xp.any(~self.xp.isfinite(model_d_for_hosts)): 
-                # logger.debug(f"Non-finite values in model_d_for_hosts for H0 = {H0}. Example: {model_d_for_hosts[~self.xp.isfinite(model_d_for_hosts)][:min(5, len(model_d_for_hosts[~self.xp.isfinite(model_d_for_hosts)]))]}") 
-                return -self.xp.inf 
-        except Exception as e: 
-            # logger.debug(f"EXCEPTION in _lum_dist_model for H0 = {H0}: {e}") 
-            return -self.xp.inf 
+        """Compute log-likelihood for H0 and alpha parameters."""
+        H0, alpha = theta[0], theta[1]
         
-        sigma_d_val_for_hosts = (model_d_for_hosts / self.c_val) * self.sigma_v
-        sigma_d_val_for_hosts = self.xp.maximum(sigma_d_val_for_hosts, 1e-9) 
-        # logger.debug(f"sigma_d_val_for_hosts (first 5 if available): {sigma_d_val_for_hosts[:min(5, len(sigma_d_val_for_hosts))]}") 
-        if self.xp.any(~self.xp.isfinite(sigma_d_val_for_hosts)): 
-            # logger.debug(f"Non-finite values in sigma_d_val_for_hosts for H0 = {H0}.") 
+        # 1. Validate parameters
+        if not self._validate_parameters(H0, alpha):
             return -self.xp.inf
+            
+        # 2. Compute distances and uncertainties  
+        distances_result = self._compute_distances_and_uncertainties(H0)
+        if distances_result is None:
+            return -self.xp.inf
+        model_distances, distance_uncertainties = distances_result
+            
+        # 3. Compute likelihood contributions from all galaxies
+        galaxy_log_likelihoods = self._compute_galaxy_likelihoods(
+            model_distances, distance_uncertainties, H0
+        )
+        if galaxy_log_likelihoods is None:
+            return -self.xp.inf
+            
+        # 4. Apply mass weighting based on alpha
+        galaxy_weights = self._compute_galaxy_weights(alpha)  
+        if galaxy_weights is None:
+            return -self.xp.inf
+            
+        # 5. Combine weighted likelihoods
+        return self._combine_weighted_likelihoods(galaxy_log_likelihoods, galaxy_weights)
 
-        log_sum_over_gw_samples = self.xp.array([-self.xp.inf]) # Placeholder for now
+    def _validate_parameters(self, H0, alpha):
+        """Validate H0 and alpha are within their respective prior bounds.
+        
+        Args:
+            H0 (float): Hubble constant value to validate
+            alpha (float): Mass bias parameter to validate
+            
+        Returns:
+            bool: True if both parameters are within bounds, False otherwise
+        """
+        h0_valid = self.h0_min <= H0 <= self.h0_max
+        alpha_valid = self.alpha_min <= alpha <= self.alpha_max
+        return h0_valid and alpha_valid
+        
+    def _compute_distances_and_uncertainties(self, H0):
+        """Compute model luminosity distances and their uncertainties.
+        
+        Args:
+            H0 (float): Hubble constant value
+            
+        Returns:
+            tuple: (model_distances, distance_uncertainties) or None if computation fails
+        """
+        try:
+            # Compute luminosity distances for all host galaxies
+            model_d_for_hosts = self._lum_dist_model(self.z_values, H0)
+            
+            # Check for finite values
+            if self.xp.any(~self.xp.isfinite(model_d_for_hosts)):
+                return None
+                
+            # Compute distance uncertainties from peculiar velocity
+            sigma_d_val_for_hosts = (model_d_for_hosts / self.c_val) * self.sigma_v
+            sigma_d_val_for_hosts = self.xp.maximum(sigma_d_val_for_hosts, 1e-9)
+            
+            # Check for finite uncertainties
+            if self.xp.any(~self.xp.isfinite(sigma_d_val_for_hosts)):
+                return None
+                
+            return model_d_for_hosts, sigma_d_val_for_hosts
+            
+        except Exception:
+            return None
 
+    def _compute_galaxy_likelihoods(self, model_distances, distance_uncertainties, H0):
+        """Compute likelihood contributions from all galaxies.
+        
+        Dispatches to either vectorized or looped implementation based on 
+        the use_vectorized_likelihood setting.
+        
+        Args:
+            model_distances: Luminosity distances for each galaxy
+            distance_uncertainties: Distance uncertainties for each galaxy  
+            H0 (float): Hubble constant value
+            
+        Returns:
+            array: Log-likelihood contribution for each galaxy, or None if computation fails
+        """
         if self.use_vectorized_likelihood:
-            # --- Fully Vectorized Alternative with Redshift Marginalization ---
-            # logger.debug("Using fully vectorized likelihood path with redshift marginalization.")
-            
-            # Check which galaxies need redshift marginalization
-            needs_marginalization = self.z_err_values >= self.z_err_threshold
-            
-            if not self.xp.any(needs_marginalization):
-                # All galaxies below threshold - use simple vectorized computation
-                try:
-                    log_pdf_values_full = logpdf_normal_xp(
-                        self.xp,
-                        self.dL_gw_samples[:, self.xp.newaxis],
-                        loc=model_d_for_hosts[self.xp.newaxis, :],
-                        scale=sigma_d_val_for_hosts[self.xp.newaxis, :]
-                    ) # Shape: (N_samples, N_hosts)
-                except Exception as e:
-                    return -self.xp.inf
-
-                # Handle potential NaNs by converting them to -self.xp.inf
-                log_pdf_values_full = self.xp.where(self.xp.isnan(log_pdf_values_full), -self.xp.inf, log_pdf_values_full)
-
-                # Use the new logsumexp_xp helper function
-                log_sum_over_gw_samples = logsumexp_xp(self.xp, log_pdf_values_full, axis=0) - self.xp.log(self.xp.array(len(self.dL_gw_samples), dtype=self.xp.float64))
-            
-            else:
-                # Some galaxies need marginalization - implement vectorized quadrature
-                log_sum_over_gw_samples = self.xp.zeros(len(self.z_values))
-                
-                # Process galaxies that don't need marginalization
-                no_marg_mask = ~needs_marginalization
-                if self.xp.any(no_marg_mask):
-                    try:
-                        log_pdf_no_marg = logpdf_normal_xp(
-                            self.xp,
-                            self.dL_gw_samples[:, self.xp.newaxis],
-                            loc=model_d_for_hosts[self.xp.newaxis, no_marg_mask],
-                            scale=sigma_d_val_for_hosts[self.xp.newaxis, no_marg_mask]
-                        )
-                        log_pdf_no_marg = self.xp.where(self.xp.isnan(log_pdf_no_marg), -self.xp.inf, log_pdf_no_marg)
-                        log_sum_no_marg = logsumexp_xp(self.xp, log_pdf_no_marg, axis=0) - self.xp.log(self.xp.array(len(self.dL_gw_samples), dtype=self.xp.float64))
-                        
-                        # Update the results for non-marginalized galaxies
-                        no_marg_indices = self.xp.where(no_marg_mask)[0]
-                        for i, idx in enumerate(no_marg_indices):
-                            log_sum_over_gw_samples = self._update_array_element(log_sum_over_gw_samples, idx, log_sum_no_marg[i])
-                    except Exception:
-                        # Set non-marginalized galaxies to -inf if computation fails
-                        for idx in self.xp.where(no_marg_mask)[0]:
-                            log_sum_over_gw_samples = self._update_array_element(log_sum_over_gw_samples, idx, -self.xp.inf)
-                
-                # Process galaxies that need marginalization
-                marg_indices = self.xp.where(needs_marginalization)[0]
-                for idx in marg_indices:
-                    mu_z = self.z_values[idx]
-                    sigma_z = self.z_err_values[idx]
-                    
-                    # Compute integration bounds
-                    z_min = self.xp.maximum(mu_z - self.z_sigma_range * sigma_z, 1e-6)
-                    z_max = mu_z + self.z_sigma_range * sigma_z
-                    
-                    if z_max <= z_min:
-                        # Fallback to point estimate
-                        try:
-                            log_pdf_point = logpdf_normal_xp(
-                                self.xp,
-                                self.dL_gw_samples,
-                                loc=model_d_for_hosts[idx],
-                                scale=sigma_d_val_for_hosts[idx]
-                            )
-                            if self.xp.any(~self.xp.isfinite(log_pdf_point)):
-                                log_sum_over_gw_samples = self._update_array_element(log_sum_over_gw_samples, idx, -self.xp.inf)
-                            else:
-                                reduced_log_pdf = logsumexp_xp(self.xp, log_pdf_point)
-                                term_val = reduced_log_pdf - self.xp.log(self.xp.array(len(self.dL_gw_samples), dtype=self.xp.float64))
-                                log_sum_over_gw_samples = self._update_array_element(log_sum_over_gw_samples, idx, term_val)
-                        except Exception:
-                            log_sum_over_gw_samples = self._update_array_element(log_sum_over_gw_samples, idx, -self.xp.inf)
-                        continue
-                    
-                    # Vectorized quadrature integration
-                    try:
-                        # Transform quadrature nodes to redshift domain
-                        z_quad = mu_z + self.xp.sqrt(2.0) * sigma_z * self._quad_nodes  # Shape: (n_quad_points,)
-                        
-                        # Filter out negative redshifts
-                        valid_z_mask = z_quad > 0
-                        if not self.xp.any(valid_z_mask):
-                            log_sum_over_gw_samples = self._update_array_element(log_sum_over_gw_samples, idx, -self.xp.inf)
-                            continue
-                        
-                        z_quad_valid = z_quad[valid_z_mask]
-                        quad_weights_valid = self._quad_weights[valid_z_mask]
-                        
-                        # Vectorized distance computation for all quadrature points
-                        # This is the expensive part - we need to compute luminosity distance for each z
-                        model_d_quad = self.xp.array([self._lum_dist_model(z_val, H0) for z_val in z_quad_valid])
-                        
-                        # Check for valid distances
-                        valid_d_mask = (self.xp.isfinite(model_d_quad)) & (model_d_quad > 0)
-                        if not self.xp.any(valid_d_mask):
-                            log_sum_over_gw_samples = self._update_array_element(log_sum_over_gw_samples, idx, -self.xp.inf)
-                            continue
-                        
-                        model_d_quad_valid = model_d_quad[valid_d_mask]
-                        quad_weights_final = quad_weights_valid[valid_d_mask]
-                        
-                        # Compute sigma_d for each quadrature point
-                        sigma_d_quad = self.xp.maximum((model_d_quad_valid / self.c_val) * self.sigma_v, 1e-9)
-                        
-                        # Vectorized likelihood computation across quadrature points
-                        # Shape: (n_gw_samples, n_quad_points_valid)
-                        log_pdf_quad = logpdf_normal_xp(
-                            self.xp,
-                            self.dL_gw_samples[:, self.xp.newaxis],
-                            loc=model_d_quad_valid[self.xp.newaxis, :],
-                            scale=sigma_d_quad[self.xp.newaxis, :]
-                        )
-                        
-                        # Check for finite values
-                        if self.xp.any(~self.xp.isfinite(log_pdf_quad)):
-                            log_pdf_quad = self.xp.where(self.xp.isnan(log_pdf_quad), -self.xp.inf, log_pdf_quad)
-                        
-                        # Sum over GW samples for each quadrature point
-                        log_likelihood_quad = logsumexp_xp(self.xp, log_pdf_quad, axis=0) - self.xp.log(self.xp.array(len(self.dL_gw_samples), dtype=self.xp.float64))
-                        
-                        # Apply quadrature weights and integrate
-                        log_weights_quad = self.xp.log(quad_weights_final / self.xp.sqrt(self.xp.pi))
-                        log_integrand_quad = log_weights_quad + log_likelihood_quad
-                        
-                        # Final integration using logsumexp
-                        log_integrated_prob = logsumexp_xp(self.xp, log_integrand_quad)
-                        log_sum_over_gw_samples = self._update_array_element(log_sum_over_gw_samples, idx, log_integrated_prob)
-                        
-                    except Exception:
-                        # Integration failed - set to -inf
-                        log_sum_over_gw_samples = self._update_array_element(log_sum_over_gw_samples, idx, -self.xp.inf)
-            
-            # Check for any non-finite values in final result
-            if self.xp.any(~self.xp.isfinite(log_sum_over_gw_samples)):
-                return -self.xp.inf
-
+            return self._compute_galaxy_likelihoods_vectorized(
+                model_distances, distance_uncertainties, H0
+            )
         else:
-            # --- Memory-Efficient Loop with Redshift Marginalization ---
-            log_P_data_H0_zi_terms = self.xp.zeros(len(self.z_values))
-            for i in range(len(self.z_values)):
-                mu_z = self.z_values[i]
-                sigma_z = self.z_err_values[i]
+            return self._compute_galaxy_likelihoods_looped(
+                model_distances, distance_uncertainties, H0
+            )
 
-                # Use the new, much smaller threshold for skipping marginalization
-                if sigma_z < self.z_err_threshold:
-                    # Only skip marginalization for essentially zero uncertainty
-                    current_model_d = model_d_for_hosts[i]
-                    current_sigma_d = sigma_d_val_for_hosts[i]
-                    try:
-                        log_pdf_for_one_galaxy = logpdf_normal_xp(
-                            self.xp,
-                            self.dL_gw_samples,
-                            loc=current_model_d,
-                            scale=current_sigma_d,
-                        )
-                    except Exception:
-                        log_pdf_for_one_galaxy = self.xp.full(len(self.dL_gw_samples), -self.xp.inf)
-
-                    if self.xp.any(~self.xp.isfinite(log_pdf_for_one_galaxy)):
-                        log_P_data_H0_zi_terms = self._update_array_element(log_P_data_H0_zi_terms, i, -self.xp.inf)
-                    else:
-                        reduced_log_pdf = logsumexp_xp(self.xp, log_pdf_for_one_galaxy)
-                        term_val = reduced_log_pdf - self.xp.log(self.xp.array(len(self.dL_gw_samples), dtype=self.xp.float64))
-                        log_P_data_H0_zi_terms = self._update_array_element(log_P_data_H0_zi_terms, i, term_val)
-                    continue
-
-                # Perform proper redshift marginalization
-                # Integrate over a wider range for better accuracy
-                z_min = self.xp.maximum(mu_z - self.z_sigma_range * sigma_z, 1e-6)  # Ensure positive
-                z_max = mu_z + self.z_sigma_range * sigma_z
-                
-                # Check if the integration range is meaningful
-                if z_max <= z_min:
-                    # Fallback to point estimate if range is degenerate
-                    current_model_d = model_d_for_hosts[i]
-                    current_sigma_d = sigma_d_val_for_hosts[i]
-                    try:
-                        log_pdf_for_one_galaxy = logpdf_normal_xp(
-                            self.xp,
-                            self.dL_gw_samples,
-                            loc=current_model_d,
-                            scale=current_sigma_d,
-                        )
-                        reduced_log_pdf = logsumexp_xp(self.xp, log_pdf_for_one_galaxy)
-                        term_val = reduced_log_pdf - self.xp.log(self.xp.array(len(self.dL_gw_samples), dtype=self.xp.float64))
-                        log_P_data_H0_zi_terms = self._update_array_element(log_P_data_H0_zi_terms, i, term_val)
-                    except Exception:
-                        log_P_data_H0_zi_terms = self._update_array_element(log_P_data_H0_zi_terms, i, -self.xp.inf)
-                    continue
-
-                # Gaussian quadrature integration
-                log_integrand_values = []
-                valid_evaluations = 0
-                
-                for node, weight in zip(self._quad_nodes, self._quad_weights):
-                    # Transform quadrature point to redshift domain
-                    z_j = mu_z + self.xp.sqrt(2.0) * sigma_z * node
-                    
-                    # Skip negative redshifts
-                    if z_j <= 0:
-                        continue
-                        
-                    try:
-                        # Compute luminosity distance for this redshift
-                        model_d = self._lum_dist_model(z_j, H0)
-                        
-                        # Check if model distance is reasonable
-                        if not self.xp.isfinite(model_d) or model_d <= 0:
-                            continue
-                            
-                        sigma_d = self.xp.maximum((model_d / self.c_val) * self.sigma_v, 1e-9)
-                        
-                        # Compute likelihood for this redshift
-                        log_pdf = logpdf_normal_xp(
-                            self.xp,
-                            self.dL_gw_samples,
-                            loc=model_d,
-                            scale=sigma_d,
-                        )
-                        
-                        if self.xp.any(~self.xp.isfinite(log_pdf)):
-                            continue
-                        
-                        # Sum over GW samples
-                        current_logsumexp = logsumexp_xp(self.xp, log_pdf)
-                        log_likelihood_at_z = current_logsumexp - self.xp.log(self.xp.array(len(self.dL_gw_samples), dtype=self.xp.float64))
-                        
-                        # Store log(weight * likelihood) for numerical stability
-                        log_weight = self.xp.log(weight / self.xp.sqrt(self.xp.pi))
-                        log_integrand_values.append(log_weight + log_likelihood_at_z)
-                        valid_evaluations += 1
-                        
-                    except Exception:
-                        # Skip this quadrature point if evaluation fails
-                        continue
-
-                # Combine the integration results
-                if valid_evaluations > 0 and len(log_integrand_values) > 0:
-                    # Use logsumexp for numerical stability
-                    log_integrand_array = self.xp.array(log_integrand_values)
-                    log_integrated_prob = logsumexp_xp(self.xp, log_integrand_array)
-                    log_P_data_H0_zi_terms = self._update_array_element(log_P_data_H0_zi_terms, i, log_integrated_prob)
-                else:
-                    # Integration failed - set to -inf
-                    log_P_data_H0_zi_terms = self._update_array_element(log_P_data_H0_zi_terms, i, -self.xp.inf)
+    def _compute_galaxy_likelihoods_vectorized(self, model_distances, distance_uncertainties, H0):
+        """Compute galaxy likelihoods using vectorized operations for memory efficiency.
+        
+        Args:
+            model_distances: Luminosity distances for each galaxy
+            distance_uncertainties: Distance uncertainties for each galaxy
+            H0 (float): Hubble constant value
             
-            log_sum_over_gw_samples = log_P_data_H0_zi_terms
+        Returns:
+            array: Log-likelihood contribution for each galaxy, or None if computation fails
+        """
+        # Check which galaxies need redshift marginalization
+        needs_marginalization = self.z_err_values >= self.z_err_threshold
+        
+        if not self.xp.any(needs_marginalization):
+            # All galaxies below threshold - use simple vectorized computation
+            return self._compute_simple_vectorized_likelihoods(
+                model_distances, distance_uncertainties
+            )
+        else:
+            # Some galaxies need marginalization
+            return self._compute_mixed_vectorized_likelihoods(
+                model_distances, distance_uncertainties, H0, needs_marginalization
+            )
 
-        alpha = theta[1]
-        if not (self.alpha_min <= alpha <= self.alpha_max):
+    def _compute_simple_vectorized_likelihoods(self, model_distances, distance_uncertainties):
+        """Compute likelihoods when no redshift marginalization is needed.
+        
+        Args:
+            model_distances: Luminosity distances for each galaxy
+            distance_uncertainties: Distance uncertainties for each galaxy
+            
+        Returns:
+            array: Log-likelihood contribution for each galaxy, or None if computation fails
+        """
+        try:
+            log_pdf_values_full = logpdf_normal_xp(
+                self.xp,
+                self.dL_gw_samples[:, self.xp.newaxis],
+                loc=model_distances[self.xp.newaxis, :],
+                scale=distance_uncertainties[self.xp.newaxis, :]
+            )  # Shape: (N_samples, N_hosts)
+        except Exception:
+            return None
+
+        # Handle potential NaNs by converting them to -inf
+        log_pdf_values_full = self.xp.where(
+            self.xp.isnan(log_pdf_values_full), -self.xp.inf, log_pdf_values_full
+        )
+
+        # Sum over GW samples and normalize
+        log_sum_over_gw_samples = logsumexp_xp(self.xp, log_pdf_values_full, axis=0) - \
+                                 self.xp.log(self.xp.array(len(self.dL_gw_samples), dtype=self.xp.float64))
+        
+        return log_sum_over_gw_samples
+
+    def _compute_mixed_vectorized_likelihoods(self, model_distances, distance_uncertainties, H0, needs_marginalization):
+        """Compute likelihoods when some galaxies need redshift marginalization.
+        
+        Args:
+            model_distances: Luminosity distances for each galaxy
+            distance_uncertainties: Distance uncertainties for each galaxy  
+            H0 (float): Hubble constant value
+            needs_marginalization: Boolean mask indicating which galaxies need marginalization
+            
+        Returns:
+            array: Log-likelihood contribution for each galaxy, or None if computation fails
+        """
+        log_sum_over_gw_samples = self.xp.zeros(len(self.z_values))
+        
+        # Process galaxies that don't need marginalization
+        no_marg_mask = ~needs_marginalization
+        if self.xp.any(no_marg_mask):
+            no_marg_result = self._process_non_marginalized_galaxies_vectorized(
+                model_distances, distance_uncertainties, no_marg_mask
+            )
+            if no_marg_result is not None:
+                log_sum_no_marg, no_marg_indices = no_marg_result
+                # Update results for non-marginalized galaxies
+                for i, idx in enumerate(no_marg_indices):
+                    log_sum_over_gw_samples = self._update_array_element(
+                        log_sum_over_gw_samples, idx, log_sum_no_marg[i]
+                    )
+            else:
+                # Set non-marginalized galaxies to -inf if computation fails
+                for idx in self.xp.where(no_marg_mask)[0]:
+                    log_sum_over_gw_samples = self._update_array_element(
+                        log_sum_over_gw_samples, idx, -self.xp.inf
+                    )
+        
+        # Process galaxies that need marginalization
+        marginalized_result = self._process_marginalized_galaxies_vectorized(
+            model_distances, distance_uncertainties, H0, needs_marginalization
+        )
+        if marginalized_result is not None:
+            marg_likelihoods, marg_indices = marginalized_result
+            for i, idx in enumerate(marg_indices):
+                log_sum_over_gw_samples = self._update_array_element(
+                    log_sum_over_gw_samples, idx, marg_likelihoods[i]
+                )
+        
+        # Check for any non-finite values in final result
+        if self.xp.any(~self.xp.isfinite(log_sum_over_gw_samples)):
+            return None
+            
+        return log_sum_over_gw_samples
+
+    def _process_non_marginalized_galaxies_vectorized(self, model_distances, distance_uncertainties, no_marg_mask):
+        """Process galaxies that don't need redshift marginalization in vectorized mode.
+        
+        Args:
+            model_distances: Luminosity distances for each galaxy
+            distance_uncertainties: Distance uncertainties for each galaxy
+            no_marg_mask: Boolean mask for galaxies that don't need marginalization
+            
+        Returns:
+            tuple: (log_likelihoods, indices) or None if computation fails
+        """
+        try:
+            log_pdf_no_marg = logpdf_normal_xp(
+                self.xp,
+                self.dL_gw_samples[:, self.xp.newaxis],
+                loc=model_distances[self.xp.newaxis, no_marg_mask],
+                scale=distance_uncertainties[self.xp.newaxis, no_marg_mask]
+            )
+            log_pdf_no_marg = self.xp.where(self.xp.isnan(log_pdf_no_marg), -self.xp.inf, log_pdf_no_marg)
+            log_sum_no_marg = logsumexp_xp(self.xp, log_pdf_no_marg, axis=0) - \
+                             self.xp.log(self.xp.array(len(self.dL_gw_samples), dtype=self.xp.float64))
+            
+            no_marg_indices = self.xp.where(no_marg_mask)[0]
+            return log_sum_no_marg, no_marg_indices
+        except Exception:
+            return None
+
+    def _process_marginalized_galaxies_vectorized(self, model_distances, distance_uncertainties, H0, needs_marginalization):
+        """Process galaxies that need redshift marginalization in vectorized mode.
+        
+        Args:
+            model_distances: Luminosity distances for each galaxy
+            distance_uncertainties: Distance uncertainties for each galaxy
+            H0 (float): Hubble constant value
+            needs_marginalization: Boolean mask for galaxies that need marginalization
+            
+        Returns:
+            tuple: (log_likelihoods, indices) or None if computation fails
+        """
+        marg_indices = self.xp.where(needs_marginalization)[0]
+        marg_likelihoods = []
+        
+        for idx in marg_indices:
+            likelihood = self._marginalize_single_galaxy_redshift_vectorized(
+                idx, model_distances[idx], H0
+            )
+            marg_likelihoods.append(likelihood)
+        
+        return self.xp.array(marg_likelihoods), marg_indices
+
+    def _marginalize_single_galaxy_redshift_vectorized(self, galaxy_idx, model_distance, H0):
+        """Perform redshift marginalization for a single galaxy using vectorized quadrature.
+        
+        Args:
+            galaxy_idx (int): Index of the galaxy to marginalize
+            model_distance (float): Model luminosity distance for this galaxy
+            H0 (float): Hubble constant value
+            
+        Returns:
+            float: Marginalized log-likelihood for this galaxy
+        """
+        mu_z = self.z_values[galaxy_idx]
+        sigma_z = self.z_err_values[galaxy_idx]
+        
+        # Compute integration bounds
+        z_min = self.xp.maximum(mu_z - self.z_sigma_range * sigma_z, 1e-6)
+        z_max = mu_z + self.z_sigma_range * sigma_z
+        
+        if z_max <= z_min:
+            # Fallback to point estimate
+            return self._compute_point_estimate_likelihood(model_distance)
+        
+        try:
+            return self._perform_vectorized_quadrature_integration(
+                mu_z, sigma_z, H0
+            )
+        except Exception:
+            # Integration failed - return -inf
             return -self.xp.inf
 
-        if self.xp.isclose(alpha, 0.0):
-            weights = self.xp.full(len(self.mass_proxy_values), 1.0 / len(self.mass_proxy_values))
+    def _compute_point_estimate_likelihood(self, model_distance):
+        """Compute likelihood using point estimate (no marginalization).
+        
+        Args:
+            model_distance (float): Model luminosity distance
+            
+        Returns:
+            float: Log-likelihood value
+        """
+        try:
+            sigma_d = self.xp.maximum((model_distance / self.c_val) * self.sigma_v, 1e-9)
+            log_pdf_point = logpdf_normal_xp(
+                self.xp,
+                self.dL_gw_samples,
+                loc=model_distance,
+                scale=sigma_d
+            )
+            if self.xp.any(~self.xp.isfinite(log_pdf_point)):
+                return -self.xp.inf
+            else:
+                reduced_log_pdf = logsumexp_xp(self.xp, log_pdf_point)
+                return reduced_log_pdf - self.xp.log(self.xp.array(len(self.dL_gw_samples), dtype=self.xp.float64))
+        except Exception:
+            return -self.xp.inf
+
+    def _perform_vectorized_quadrature_integration(self, mu_z, sigma_z, H0):
+        """Perform Gaussian quadrature integration for redshift marginalization.
+        
+        Args:
+            mu_z (float): Mean redshift
+            sigma_z (float): Redshift uncertainty
+            H0 (float): Hubble constant value
+            
+        Returns:
+            float: Integrated log-likelihood
+        """
+        # Transform quadrature nodes to redshift domain
+        z_quad = mu_z + self.xp.sqrt(2.0) * sigma_z * self._quad_nodes
+        
+        # Filter out negative redshifts
+        valid_z_mask = z_quad > 0
+        if not self.xp.any(valid_z_mask):
+            return -self.xp.inf
+        
+        z_quad_valid = z_quad[valid_z_mask]
+        quad_weights_valid = self._quad_weights[valid_z_mask]
+        
+        # Vectorized distance computation for all quadrature points
+        model_d_quad = self.xp.array([self._lum_dist_model(z_val, H0) for z_val in z_quad_valid])
+        
+        # Check for valid distances
+        valid_d_mask = (self.xp.isfinite(model_d_quad)) & (model_d_quad > 0)
+        if not self.xp.any(valid_d_mask):
+            return -self.xp.inf
+        
+        model_d_quad_valid = model_d_quad[valid_d_mask]
+        quad_weights_final = quad_weights_valid[valid_d_mask]
+        
+        # Compute sigma_d for each quadrature point
+        sigma_d_quad = self.xp.maximum((model_d_quad_valid / self.c_val) * self.sigma_v, 1e-9)
+        
+        # Vectorized likelihood computation across quadrature points
+        log_pdf_quad = logpdf_normal_xp(
+            self.xp,
+            self.dL_gw_samples[:, self.xp.newaxis],
+            loc=model_d_quad_valid[self.xp.newaxis, :],
+            scale=sigma_d_quad[self.xp.newaxis, :]
+        )
+        
+        # Check for finite values
+        if self.xp.any(~self.xp.isfinite(log_pdf_quad)):
+            log_pdf_quad = self.xp.where(self.xp.isnan(log_pdf_quad), -self.xp.inf, log_pdf_quad)
+        
+        # Sum over GW samples for each quadrature point
+        log_likelihood_quad = logsumexp_xp(self.xp, log_pdf_quad, axis=0) - \
+                             self.xp.log(self.xp.array(len(self.dL_gw_samples), dtype=self.xp.float64))
+        
+        # Apply quadrature weights and integrate
+        log_weights_quad = self.xp.log(quad_weights_final / self.xp.sqrt(self.xp.pi))
+        log_integrand_quad = log_weights_quad + log_likelihood_quad
+        
+        # Final integration using logsumexp
+        return logsumexp_xp(self.xp, log_integrand_quad)
+
+    def _compute_galaxy_likelihoods_looped(self, model_distances, distance_uncertainties, H0):
+        """Compute galaxy likelihoods using memory-efficient looped approach.
+        
+        Args:
+            model_distances: Luminosity distances for each galaxy
+            distance_uncertainties: Distance uncertainties for each galaxy
+            H0 (float): Hubble constant value
+            
+        Returns:
+            array: Log-likelihood contribution for each galaxy, or None if computation fails
+        """
+        log_P_data_H0_zi_terms = self.xp.zeros(len(self.z_values))
+        
+        for i in range(len(self.z_values)):
+            likelihood = self._compute_single_galaxy_likelihood_looped(
+                i, model_distances[i], distance_uncertainties[i], H0
+            )
+            log_P_data_H0_zi_terms = self._update_array_element(
+                log_P_data_H0_zi_terms, i, likelihood
+            )
+        
+        return log_P_data_H0_zi_terms
+
+    def _compute_single_galaxy_likelihood_looped(self, galaxy_idx, model_distance, distance_uncertainty, H0):
+        """Compute likelihood for a single galaxy in looped mode.
+        
+        Args:
+            galaxy_idx (int): Index of the galaxy
+            model_distance (float): Model luminosity distance for this galaxy
+            distance_uncertainty (float): Distance uncertainty for this galaxy
+            H0 (float): Hubble constant value
+            
+        Returns:
+            float: Log-likelihood contribution for this galaxy
+        """
+        mu_z = self.z_values[galaxy_idx]
+        sigma_z = self.z_err_values[galaxy_idx]
+
+        # Check if marginalization is needed
+        if sigma_z < self.z_err_threshold:
+            # Skip marginalization for essentially zero uncertainty
+            return self._compute_simple_galaxy_likelihood(model_distance, distance_uncertainty)
         else:
+            # Perform redshift marginalization
+            return self._marginalize_single_galaxy_redshift_looped(
+                mu_z, sigma_z, H0
+            )
+
+    def _compute_simple_galaxy_likelihood(self, model_distance, distance_uncertainty):
+        """Compute likelihood for a single galaxy without redshift marginalization.
+        
+        Args:
+            model_distance (float): Model luminosity distance
+            distance_uncertainty (float): Distance uncertainty
+            
+        Returns:
+            float: Log-likelihood value
+        """
+        try:
+            log_pdf_for_one_galaxy = logpdf_normal_xp(
+                self.xp,
+                self.dL_gw_samples,
+                loc=model_distance,
+                scale=distance_uncertainty,
+            )
+        except Exception:
+            return -self.xp.inf
+
+        if self.xp.any(~self.xp.isfinite(log_pdf_for_one_galaxy)):
+            return -self.xp.inf
+        else:
+            reduced_log_pdf = logsumexp_xp(self.xp, log_pdf_for_one_galaxy)
+            return reduced_log_pdf - self.xp.log(self.xp.array(len(self.dL_gw_samples), dtype=self.xp.float64))
+
+    def _marginalize_single_galaxy_redshift_looped(self, mu_z, sigma_z, H0):
+        """Perform redshift marginalization for a single galaxy using looped quadrature.
+        
+        Args:
+            mu_z (float): Mean redshift
+            sigma_z (float): Redshift uncertainty  
+            H0 (float): Hubble constant value
+            
+        Returns:
+            float: Marginalized log-likelihood
+        """
+        # Compute integration bounds
+        z_min = self.xp.maximum(mu_z - self.z_sigma_range * sigma_z, 1e-6)
+        z_max = mu_z + self.z_sigma_range * sigma_z
+        
+        # Check if the integration range is meaningful
+        if z_max <= z_min:
+            # Fallback to point estimate
+            model_distance = self._lum_dist_model(mu_z, H0)
+            distance_uncertainty = self.xp.maximum((model_distance / self.c_val) * self.sigma_v, 1e-9)
+            return self._compute_simple_galaxy_likelihood(model_distance, distance_uncertainty)
+
+        # Gaussian quadrature integration
+        return self._perform_looped_quadrature_integration(mu_z, sigma_z, H0)
+
+    def _perform_looped_quadrature_integration(self, mu_z, sigma_z, H0):
+        """Perform Gaussian quadrature integration using a loop over quadrature points.
+        
+        Args:
+            mu_z (float): Mean redshift
+            sigma_z (float): Redshift uncertainty
+            H0 (float): Hubble constant value
+            
+        Returns:
+            float: Integrated log-likelihood
+        """
+        log_integrand_values = []
+        valid_evaluations = 0
+        
+        for node, weight in zip(self._quad_nodes, self._quad_weights):
+            # Transform quadrature point to redshift domain
+            z_j = mu_z + self.xp.sqrt(2.0) * sigma_z * node
+            
+            # Skip negative redshifts
+            if z_j <= 0:
+                continue
+                
+            try:
+                likelihood_at_point = self._evaluate_likelihood_at_redshift_point(z_j, H0, weight)
+                if likelihood_at_point is not None:
+                    log_integrand_values.append(likelihood_at_point)
+                    valid_evaluations += 1
+            except Exception:
+                # Skip this quadrature point if evaluation fails
+                continue
+
+        # Combine the integration results
+        if valid_evaluations > 0 and len(log_integrand_values) > 0:
+            log_integrand_array = self.xp.array(log_integrand_values)
+            return logsumexp_xp(self.xp, log_integrand_array)
+        else:
+            # Integration failed - return -inf
+            return -self.xp.inf
+
+    def _evaluate_likelihood_at_redshift_point(self, z_j, H0, weight):
+        """Evaluate likelihood at a specific redshift point for quadrature integration.
+        
+        Args:
+            z_j (float): Redshift value
+            H0 (float): Hubble constant value
+            weight (float): Quadrature weight
+            
+        Returns:
+            float: Log of weighted likelihood at this point, or None if evaluation fails
+        """
+        # Compute luminosity distance for this redshift
+        model_d = self._lum_dist_model(z_j, H0)
+        
+        # Check if model distance is reasonable
+        if not self.xp.isfinite(model_d) or model_d <= 0:
+            return None
+            
+        sigma_d = self.xp.maximum((model_d / self.c_val) * self.sigma_v, 1e-9)
+        
+        # Compute likelihood for this redshift
+        log_pdf = logpdf_normal_xp(
+            self.xp,
+            self.dL_gw_samples,
+            loc=model_d,
+            scale=sigma_d,
+        )
+        
+        if self.xp.any(~self.xp.isfinite(log_pdf)):
+            return None
+        
+        # Sum over GW samples
+        current_logsumexp = logsumexp_xp(self.xp, log_pdf)
+        log_likelihood_at_z = current_logsumexp - self.xp.log(self.xp.array(len(self.dL_gw_samples), dtype=self.xp.float64))
+        
+        # Store log(weight * likelihood) for numerical stability
+        log_weight = self.xp.log(weight / self.xp.sqrt(self.xp.pi))
+        return log_weight + log_likelihood_at_z
+
+    def _compute_galaxy_weights(self, alpha):
+        """Compute galaxy weights based on mass proxy and alpha parameter.
+        
+        Args:
+            alpha (float): Mass bias parameter
+            
+        Returns:
+            array: Normalized weights for each galaxy, or None if computation fails
+        """
+        if self.xp.isclose(alpha, 0.0):
+            # Equal weights when alpha = 0
+            return self.xp.full(len(self.mass_proxy_values), 1.0 / len(self.mass_proxy_values))
+        else:
+            # Mass-weighted based on alpha
             powered = self.mass_proxy_values ** alpha
             if self.xp.any(powered <= 0) or not self.xp.all(self.xp.isfinite(powered)):
-                return -self.xp.inf
+                return None
             denom = powered.sum()
             if not self.xp.isfinite(denom) or denom <= 0:
-                return -self.xp.inf
-            weights = powered / denom
+                return None
+            return powered / denom
 
-        valid_mask = weights > 0
+    def _combine_weighted_likelihoods(self, galaxy_log_likelihoods, galaxy_weights):
+        """Combine galaxy likelihoods with their weights to compute final likelihood.
+        
+        Args:
+            galaxy_log_likelihoods: Log-likelihood contribution from each galaxy
+            galaxy_weights: Weight for each galaxy based on mass proxy
+            
+        Returns:
+            float: Final weighted log-likelihood
+        """
+        valid_mask = galaxy_weights > 0
         if not self.xp.any(valid_mask):
             return -self.xp.inf
         
-        terms_to_sum = self.xp.log(weights[valid_mask]) + log_sum_over_gw_samples[valid_mask]
+        terms_to_sum = self.xp.log(galaxy_weights[valid_mask]) + galaxy_log_likelihoods[valid_mask]
         total_log_likelihood = logsumexp_xp(self.xp, terms_to_sum)
 
         if not self.xp.isfinite(total_log_likelihood):
@@ -513,7 +793,7 @@ class H0LogLikelihood:
             return array
 
 def get_log_likelihood_h0(
-    requested_backend_str: str, # Added: explicit backend request
+    requested_backend_str: str,
     dL_gw_samples,
     host_galaxies_z,
     host_galaxies_mass_proxy,
@@ -525,11 +805,10 @@ def get_log_likelihood_h0(
     h0_max=DEFAULT_H0_PRIOR_MAX,
     alpha_min=DEFAULT_ALPHA_PRIOR_MIN,
     alpha_max=DEFAULT_ALPHA_PRIOR_MAX,
-    z_err_threshold=DEFAULT_Z_ERR_THRESHOLD,  # New parameter
-    n_quad_points=DEFAULT_QUAD_POINTS,  # New parameter
-    z_sigma_range=DEFAULT_Z_MARGINALIZATION_SIGMA_RANGE,  # New parameter
-    force_non_vectorized=False,  # New parameter to override vectorization decision
-    # use_vectorized_likelihood is determined below based on backend_name
+    z_err_threshold=DEFAULT_Z_ERR_THRESHOLD,
+    n_quad_points=DEFAULT_QUAD_POINTS,
+    z_sigma_range=DEFAULT_Z_MARGINALIZATION_SIGMA_RANGE,
+    force_non_vectorized=False,
 ):
     """
     Returns an instance of the H0LogLikelihood class, configured for the specified backend.
