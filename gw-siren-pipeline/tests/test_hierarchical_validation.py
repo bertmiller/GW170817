@@ -95,6 +95,7 @@ class TestHierarchicalStructure:
 class TestSimulationBasedCalibration:
     """Test simulation-based calibration of the hierarchical model."""
     
+    @pytest.mark.slow
     def test_sbc_rank_distribution(self, mock_config):
         """Test that SBC ranks follow uniform distribution for well-calibrated model."""
         n_simulations = 8  # Small number for testing (should be 50+ for real validation)
