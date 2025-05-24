@@ -39,6 +39,7 @@ class CombinedLogLikelihood:
         sigma_v: float = DEFAULT_SIGMA_V,
         c_val: float = DEFAULT_C_LIGHT,
         omega_m_val: float = DEFAULT_OMEGA_M,
+        force_non_vectorized: bool = False,
     ) -> None:
         """Initialize the combined likelihood.
 
@@ -52,6 +53,8 @@ class CombinedLogLikelihood:
             sigma_v: Peculiar velocity dispersion in km/s.
             c_val: Speed of light in km/s.
             omega_m_val: Matter density parameter.
+            force_non_vectorized: Force non-vectorized likelihood computation
+                for better performance with many galaxies.
         """
         self.event_data_packages = event_data_packages
         self.global_h0_min = global_h0_min
@@ -67,6 +70,7 @@ class CombinedLogLikelihood:
             "h0_max": self.global_h0_max,
             "alpha_min": self.global_alpha_min,
             "alpha_max": self.global_alpha_max,
+            "force_non_vectorized": force_non_vectorized,
         }
 
         self.single_event_likelihoods = []
@@ -95,21 +99,46 @@ class CombinedLogLikelihood:
             likelihood evaluates to ``-np.inf``.
         """
         H0, alpha = theta
-
-        if not (self.global_h0_min <= H0 <= self.global_h0_max):
-            logger.debug("H0 %s outside global prior", H0)
+        
+        if self._validate_h0(H0):
             return -np.inf
-        if not (self.global_alpha_min <= alpha <= self.global_alpha_max):
-            logger.debug("alpha %s outside global prior", alpha)
+        if self._validate_alpha(alpha):
             return -np.inf
 
         total = 0.0
-        for ll in self.single_event_likelihoods:
+        for i, ll in enumerate(self.single_event_likelihoods):
             val = ll(theta)
             if val == -np.inf:
+                logger.debug("Event %d returned -inf for theta=%s", i, theta)
                 return -np.inf
             total += val
         return total
+    
+    def _validate_h0(self, H0):
+        if not (self.global_h0_min <= H0 <= self.global_h0_max):
+            logger.debug("H0 %s outside global prior [%s, %s]", H0, self.global_h0_min, self.global_h0_max)
+            return True
+        return False
+    
+    def _validate_alpha(self, alpha):
+        if not (self.global_alpha_min <= alpha <= self.global_alpha_max):
+            logger.debug("alpha %s outside global prior [%s, %s]", alpha, self.global_alpha_min, self.global_alpha_max)
+            return True
+        return False
+    
+    def _validate_inputs(self, theta):
+        """Validate that theta has the correct format.
+        
+        Args:
+            theta: Parameter vector [H0, alpha]
+            
+        Returns:
+            bool: True if valid, False otherwise
+        """
+        try:
+            return len(theta) == 2 and all(np.isfinite(theta))
+        except (TypeError, ValueError):
+            return False
 
 
 __all__ = ["CombinedLogLikelihood"]

@@ -17,6 +17,23 @@ class ComputationConfig:
     backend: str = "auto"  # Options: "auto", "numpy", "jax"
 
 
+@dataclass(frozen=True)
+class RedshiftMarginalizationConfig:
+    """Configuration for redshift marginalization in likelihood computation."""
+    z_err_threshold: float = 1e-6  # Threshold below which to skip marginalization
+    n_quad_points: int = 7  # Number of Gaussian quadrature points
+    sigma_range: float = 4.0  # How many sigma to integrate over
+
+
+@dataclass(frozen=True)
+class MCMCInitialPositions:
+    """Initial position configuration for MCMC parameters."""
+    h0_mean: float = 70.0
+    h0_std: float = 10.0
+    alpha_mean: float = 0.0
+    alpha_std: float = 0.5
+
+
 def _minimal_yaml_load(text: str) -> dict:
     """Very small YAML loader supporting two-level mappings."""
     data: dict[str, dict[str, object]] = {}
@@ -138,34 +155,47 @@ def _parse_multi_event_config(raw: Dict) -> MultiEventAnalysisSettings:
     priors_raw = raw.get("priors")
     priors_cfg = None
     if isinstance(priors_raw, dict):
-        priors_cfg = {
-            key: MEPriorBoundaries(**val) for key, val in priors_raw.items()
-        }
+        priors_cfg = {}
+        for key, val in priors_raw.items():
+            if isinstance(val, dict):
+                val_converted = _convert_numeric_values(val)
+                priors_cfg[key] = MEPriorBoundaries(**val_converted)
+            else:
+                priors_cfg[key] = val
 
     mcmc_raw = raw.get("mcmc")
     mcmc_cfg = None
     if isinstance(mcmc_raw, dict):
-        init_raw = mcmc_raw.get("initial_pos_config")
+        # Convert numeric values in mcmc config
+        mcmc_converted = _convert_numeric_values(mcmc_raw)
+        
+        init_raw = mcmc_converted.get("initial_pos_config")
         init_cfg = None
         if isinstance(init_raw, dict):
-            init_cfg = {
-                k: MEInitialPosParam(**v) for k, v in init_raw.items()
-            }
+            init_cfg = {}
+            for k, v in init_raw.items():
+                if isinstance(v, dict):
+                    v_converted = _convert_numeric_values(v)
+                    init_cfg[k] = MEInitialPosParam(**v_converted)
+                else:
+                    init_cfg[k] = v
+        
         mcmc_cfg = MEMCMCConfig(
-            n_walkers=mcmc_raw.get("n_walkers"),
-            n_steps=mcmc_raw.get("n_steps"),
-            burnin=mcmc_raw.get("burnin"),
-            thin_by=mcmc_raw.get("thin_by"),
+            n_walkers=mcmc_converted.get("n_walkers"),
+            n_steps=mcmc_converted.get("n_steps"),
+            burnin=mcmc_converted.get("burnin"),
+            thin_by=mcmc_converted.get("thin_by"),
             initial_pos_config=init_cfg,
         )
 
     cosmo_raw = raw.get("cosmology")
     cosmo_cfg = None
     if isinstance(cosmo_raw, dict):
+        cosmo_converted = _convert_numeric_values(cosmo_raw)
         cosmo_cfg = MECosmologyConfig(
-            sigma_v_pec=cosmo_raw.get("sigma_v_pec"),
-            c_light=cosmo_raw.get("c_light"),
-            omega_m_val=cosmo_raw.get("omega_m_val"),
+            sigma_v_pec=cosmo_converted.get("sigma_v_pec"),
+            c_light=cosmo_converted.get("c_light"),
+            omega_m_val=cosmo_converted.get("omega_m_val"),
         )
 
     return MultiEventAnalysisSettings(
@@ -176,6 +206,28 @@ def _parse_multi_event_config(raw: Dict) -> MultiEventAnalysisSettings:
         cosmology=cosmo_cfg,
     )
 
+
+def _convert_numeric_values(data: dict) -> dict:
+    """Convert string numeric values to proper numeric types."""
+    if not isinstance(data, dict):
+        return data
+    
+    converted = {}
+    for key, value in data.items():
+        if isinstance(value, str):
+            # Try to convert to int first, then float
+            try:
+                converted[key] = int(value)
+            except ValueError:
+                try:
+                    converted[key] = float(value)
+                except ValueError:
+                    converted[key] = value
+        else:
+            converted[key] = value
+    return converted
+
+
 @dataclass(frozen=True)
 class Config:
     """Typed container for configuration sections."""
@@ -185,7 +237,9 @@ class Config:
     mcmc: dict
     cosmology: dict
     fetcher: dict
-    computation: ComputationConfig = field(default_factory=ComputationConfig) # Added line
+    computation: ComputationConfig = field(default_factory=ComputationConfig)
+    redshift_marginalization: RedshiftMarginalizationConfig = field(default_factory=RedshiftMarginalizationConfig)
+    mcmc_initial_positions: MCMCInitialPositions = field(default_factory=MCMCInitialPositions)
     multi_event_analysis: Optional[MultiEventAnalysisSettings] = None
 
 
@@ -214,19 +268,35 @@ def load_config(path: str | pathlib.Path | None = None) -> Config:
     else:
         raw = _minimal_yaml_load(text)
 
+    # Extract and configure computation settings
     comp_raw = raw.pop("computation", {})
-    computation_cfg = ComputationConfig(**comp_raw if isinstance(comp_raw, dict) else {})
+    comp_raw = _convert_numeric_values(comp_raw) if isinstance(comp_raw, dict) else {}
+    computation_cfg = ComputationConfig(**comp_raw)
 
-    me_raw = raw.get("multi_event_analysis") # Use .get() here, as it might not be present
-    me_cfg = None # Initialize me_cfg to None
+    # Extract and configure redshift marginalization settings
+    redshift_marg_raw = raw.pop("redshift_marginalization", {})
+    redshift_marg_raw = _convert_numeric_values(redshift_marg_raw) if isinstance(redshift_marg_raw, dict) else {}
+    redshift_marg_cfg = RedshiftMarginalizationConfig(**redshift_marg_raw)
+
+    # Extract and configure MCMC initial positions
+    mcmc_init_raw = raw.pop("mcmc_initial_positions", {})
+    mcmc_init_raw = _convert_numeric_values(mcmc_init_raw) if isinstance(mcmc_init_raw, dict) else {}
+    mcmc_init_cfg = MCMCInitialPositions(**mcmc_init_raw)
+
+    # Extract and configure multi-event analysis settings
+    me_raw = raw.get("multi_event_analysis")
+    me_cfg = None
     if me_raw is not None:
-        # Ensure me_raw is popped only if it exists, to avoid KeyError if it's missing
-        # and was already handled by .get() returning None.
-        # However, if it's present, it should be removed from `raw` before passing `**raw` to Config.
-        raw.pop("multi_event_analysis", None) # Remove if present, do nothing if not
+        raw.pop("multi_event_analysis", None)
         me_cfg = _parse_multi_event_config(me_raw)
     
-    return Config(**raw, computation=computation_cfg, multi_event_analysis=me_cfg)
+    return Config(
+        **raw, 
+        computation=computation_cfg, 
+        redshift_marginalization=redshift_marg_cfg,
+        mcmc_initial_positions=mcmc_init_cfg,
+        multi_event_analysis=me_cfg
+    )
 
 
 CONFIG = load_config()

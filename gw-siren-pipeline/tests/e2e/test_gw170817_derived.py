@@ -3,8 +3,9 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pandas as pd
+import pytest
 
-
+@pytest.mark.slow
 def test_e2e_gw170817_pipeline_with_derived_data(mocker, mock_config, tmp_path):
     """Run the H0 pipeline using pre-derived GW170817 mock data."""
     event_name = "GW170817"
