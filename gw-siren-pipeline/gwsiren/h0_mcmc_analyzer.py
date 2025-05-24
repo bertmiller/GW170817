@@ -24,19 +24,19 @@ DEFAULT_MCMC_N_WALKERS = CONFIG.mcmc["walkers"]
 DEFAULT_MCMC_N_STEPS = CONFIG.mcmc["steps"]
 DEFAULT_MCMC_BURNIN = CONFIG.mcmc["burnin"]
 DEFAULT_MCMC_THIN_BY = CONFIG.mcmc["thin_by"]
-DEFAULT_MCMC_INITIAL_H0_MEAN = 70.0
-DEFAULT_MCMC_INITIAL_H0_STD = 10.0
+DEFAULT_MCMC_INITIAL_H0_MEAN = CONFIG.mcmc_initial_positions.h0_mean
+DEFAULT_MCMC_INITIAL_H0_STD = CONFIG.mcmc_initial_positions.h0_std
 DEFAULT_H0_PRIOR_MIN = CONFIG.mcmc["prior_h0_min"]  # km/s/Mpc
 DEFAULT_H0_PRIOR_MAX = CONFIG.mcmc["prior_h0_max"]  # km/s/Mpc
 DEFAULT_ALPHA_PRIOR_MIN = CONFIG.mcmc.get("prior_alpha_min", -1.0)
 DEFAULT_ALPHA_PRIOR_MAX = CONFIG.mcmc.get("prior_alpha_max", 1.0)
-DEFAULT_MCMC_INITIAL_ALPHA_MEAN = 0.0
-DEFAULT_MCMC_INITIAL_ALPHA_STD = 0.5
+DEFAULT_MCMC_INITIAL_ALPHA_MEAN = CONFIG.mcmc_initial_positions.alpha_mean
+DEFAULT_MCMC_INITIAL_ALPHA_STD = CONFIG.mcmc_initial_positions.alpha_std
 
-# Redshift marginalization parameters
-DEFAULT_Z_ERR_THRESHOLD = 1e-6  # Much smaller threshold - only skip for essentially zero uncertainty
-DEFAULT_QUAD_POINTS = 7  # More quadrature points for better accuracy
-DEFAULT_Z_MARGINALIZATION_SIGMA_RANGE = 4.0  # How many sigma to integrate over
+# Redshift marginalization parameters - now from config
+DEFAULT_Z_ERR_THRESHOLD = CONFIG.redshift_marginalization.z_err_threshold
+DEFAULT_QUAD_POINTS = CONFIG.redshift_marginalization.n_quad_points
+DEFAULT_Z_MARGINALIZATION_SIGMA_RANGE = CONFIG.redshift_marginalization.sigma_range
 
 class H0LogLikelihood:
     """Log-likelihood for joint inference of ``H0`` and ``alpha``.

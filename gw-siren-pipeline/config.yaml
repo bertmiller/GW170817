@@ -31,6 +31,19 @@ fetcher:
 computation:
   backend: "auto" # Options: "auto", "numpy", "jax"
 
+# Redshift marginalization settings for likelihood computation
+redshift_marginalization:
+  z_err_threshold: 1e-6   # Threshold below which to skip marginalization (essentially zero uncertainty)
+  n_quad_points: 7        # Number of Gaussian quadrature points for integration
+  sigma_range: 4.0        # How many sigma to integrate over in redshift space
+
+# MCMC initial position settings
+mcmc_initial_positions:
+  h0_mean: 70.0    # Mean H0 value for walker initialization (km/s/Mpc)
+  h0_std: 10.0     # Standard deviation for H0 walker initialization
+  alpha_mean: 0.0  # Mean alpha value for walker initialization
+  alpha_std: 0.5   # Standard deviation for alpha walker initialization
+
 # Example settings for combining multiple events
 multi_event_analysis:
   run_settings:
