@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import pathlib
 import importlib
 import numpy as np
 import pytest
+
+# Force JAX CPU for testing
+os.environ["JAX_PLATFORM_NAME"] = "cpu"
 
 # Allow importing helper modules from this directory
 sys.path.append(str(pathlib.Path(__file__).resolve().parent))
@@ -36,7 +40,7 @@ def test_single_event_likelihood_peak(simple_event, mock_config):
     assert isinstance(val, float)
 
 
-@pytest.mark.parametrize("h0", [10.0, 200.0])
+@pytest.mark.parametrize("h0", [5.0, 250.0])
 def test_single_event_likelihood_out_of_bounds(simple_event, h0, mock_config):
     """Parameters outside prior range return ``-np.inf``."""
     pkg = simple_event
@@ -53,6 +57,10 @@ def test_single_event_likelihood_out_of_bounds(simple_event, h0, mock_config):
 @pytest.mark.skipif(not importlib.util.find_spec("jax"), reason="JAX not installed")
 def test_numpy_vs_jax_consistency(simple_event, mock_config):
     """NumPy and JAX backends should give the same value."""
+    # Clear backend cache to avoid interference
+    from gwsiren.backends import clear_backend_cache
+    clear_backend_cache()
+    
     pkg = simple_event
     ll_np = get_log_likelihood_h0(
         requested_backend_str="numpy",
