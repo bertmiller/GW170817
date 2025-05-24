@@ -18,7 +18,7 @@ def _base_yaml() -> str:
           data_dir: d/
         skymap:
           default_nside: 16
-          credible_level: 0.9
+          credible_level: 0.95
         mcmc:
           walkers: 4
           steps: 50

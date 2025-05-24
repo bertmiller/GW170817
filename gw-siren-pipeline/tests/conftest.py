@@ -41,7 +41,7 @@ def mock_config(monkeypatch, tmp_path, project_root_dir):
             "glade24_url": "http://fake.glade24.url/GLADE_2.4.txt",
             "data_dir": str(mock_catalog_data_dir),  # Use the temporary path
         },
-        "skymap": {"default_nside": 16, "credible_level": 0.9},
+        "skymap": {"default_nside": 16, "credible_level": 0.95},
         "mcmc": {
             "walkers": 8,
             "steps": 50,
