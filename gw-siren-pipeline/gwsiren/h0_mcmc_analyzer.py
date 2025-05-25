@@ -39,6 +39,9 @@ DEFAULT_Z_ERR_THRESHOLD = CONFIG.redshift_marginalization.z_err_threshold
 DEFAULT_QUAD_POINTS = CONFIG.redshift_marginalization.n_quad_points
 DEFAULT_Z_MARGINALIZATION_SIGMA_RANGE = CONFIG.redshift_marginalization.sigma_range
 
+# Batch processing for likelihood
+DEFAULT_MCMC_BATCH_SIZE = CONFIG.mcmc.get("batch_size", 64)
+
 class H0LogLikelihood:
     """Log-likelihood for joint inference of ``H0`` and ``alpha``.
 
@@ -76,6 +79,7 @@ class H0LogLikelihood:
         z_err_threshold=DEFAULT_Z_ERR_THRESHOLD,
         n_quad_points=DEFAULT_QUAD_POINTS,
         z_sigma_range=DEFAULT_Z_MARGINALIZATION_SIGMA_RANGE,
+        batch_size=DEFAULT_MCMC_BATCH_SIZE,
     ):
         """Initialize H0LogLikelihood with backend-agnostic computation setup.
         
@@ -99,7 +103,8 @@ class H0LogLikelihood:
         # 3. Store computational parameters
         self._setup_computational_parameters(
             sigma_v, c_val, omega_m_val, h0_min, h0_max, alpha_min, alpha_max,
-            use_vectorized_likelihood, z_err_threshold, n_quad_points, z_sigma_range
+            use_vectorized_likelihood, z_err_threshold, n_quad_points, z_sigma_range,
+            batch_size
         )
         
         # 4. Initialize quadrature integration
@@ -206,7 +211,8 @@ class H0LogLikelihood:
 
     def _setup_computational_parameters(self, sigma_v, c_val, omega_m_val, h0_min, h0_max, 
                                       alpha_min, alpha_max, use_vectorized_likelihood,
-                                      z_err_threshold, n_quad_points, z_sigma_range):
+                                      z_err_threshold, n_quad_points, z_sigma_range,
+                                      batch_size):
         """Store computational parameters for likelihood evaluation.
         
         Args:
@@ -236,6 +242,7 @@ class H0LogLikelihood:
         self.z_err_threshold = z_err_threshold
         self.n_quad_points = n_quad_points
         self.z_sigma_range = z_sigma_range
+        self.batch_size = batch_size
 
     def _setup_quadrature_integration(self, n_quad_points):
         """Initialize Gaussian quadrature nodes and weights.
@@ -464,9 +471,9 @@ class H0LogLikelihood:
                 model_distances, distance_uncertainties
             )
         else:
-            # Some galaxies need marginalization
-            return self._compute_mixed_vectorized_likelihoods(
-                model_distances, distance_uncertainties, H0, needs_marginalization
+            # Use new batched approach if not using full vectorization
+            return self._compute_galaxy_likelihoods_batched(
+                model_distances, distance_uncertainties, H0
             )
 
     def _compute_simple_vectorized_likelihoods(self, model_distances, distance_uncertainties):
@@ -512,250 +519,224 @@ class H0LogLikelihood:
         
         return log_sum_over_gw_samples
 
-    def _compute_mixed_vectorized_likelihoods(self, model_distances, distance_uncertainties, H0, needs_marginalization):
-        """Compute likelihoods when some galaxies need redshift marginalization.
+    def _compute_galaxy_likelihoods_batched(self, model_distances, distance_uncertainties, H0):
+        """Compute galaxy likelihoods using a batched and vectorized approach.
         
         Args:
-            model_distances: Luminosity distances for each galaxy
-            distance_uncertainties: Distance uncertainties for each galaxy  
+            model_distances: Luminosity distances for each galaxy (N_total_hosts,)
+            distance_uncertainties: Distance uncertainties for each galaxy (N_total_hosts,)
             H0 (float): Hubble constant value
-            needs_marginalization: Boolean mask indicating which galaxies need marginalization
             
         Returns:
             array: Log-likelihood contribution for each galaxy, or None if computation fails
         """
-        log_sum_over_gw_samples = self.xp.zeros(len(self.z_values))
-        
-        # Process galaxies that don't need marginalization
-        no_marg_mask = ~needs_marginalization
-        if self.xp.any(no_marg_mask):
-            no_marg_result = self._process_non_marginalized_galaxies_vectorized(
-                model_distances, distance_uncertainties, no_marg_mask
-            )
-            if no_marg_result is not None:
-                log_sum_no_marg, no_marg_indices = no_marg_result
-                # Update results for non-marginalized galaxies
-                for i, idx in enumerate(no_marg_indices):
-                    log_sum_over_gw_samples = self._update_array_element(
-                        log_sum_over_gw_samples, idx, log_sum_no_marg[i]
-                    )
-            else:
-                # Set non-marginalized galaxies to -inf if computation fails
-                for idx in self.xp.where(no_marg_mask)[0]:
-                    log_sum_over_gw_samples = self._update_array_element(
-                        log_sum_over_gw_samples, idx, -self.xp.inf
-                    )
-        
-        # Process galaxies that need marginalization
-        marginalized_result = self._process_marginalized_galaxies_vectorized(
-            model_distances, distance_uncertainties, H0, needs_marginalization
-        )
-        if marginalized_result is not None:
-            marg_likelihoods, marg_indices = marginalized_result
-            for i, idx in enumerate(marg_indices):
-                log_sum_over_gw_samples = self._update_array_element(
-                    log_sum_over_gw_samples, idx, marg_likelihoods[i]
-                )
-        
-        # Check for any non-finite values in final result
-        if self.xp.any(~self.xp.isfinite(log_sum_over_gw_samples)):
-            return None
-            
-        return log_sum_over_gw_samples
+        n_total_hosts = len(self.z_values)
+        # Initialize with a value indicating failure or uncomputed, like -inf
+        log_P_data_H0_zi_terms = self.xp.full(n_total_hosts, -self.xp.inf)
 
-    def _process_non_marginalized_galaxies_vectorized(self, model_distances, distance_uncertainties, no_marg_mask):
-        """Process galaxies that don't need redshift marginalization in vectorized mode.
-        
-        Args:
-            model_distances: Luminosity distances for each galaxy
-            distance_uncertainties: Distance uncertainties for each galaxy
-            no_marg_mask: Boolean mask for galaxies that don't need marginalization
+        for i_batch_start in range(0, n_total_hosts, self.batch_size):
+            i_batch_end = min(i_batch_start + self.batch_size, n_total_hosts)
             
-        Returns:
-            tuple: (log_likelihoods, indices) or None if computation fails
-        """
-        try:
-            log_pdf_no_marg = logpdf_normal_xp(
-                self.xp,
-                self.dL_gw_samples[:, self.xp.newaxis],
-                loc=model_distances[self.xp.newaxis, no_marg_mask],
-                scale=distance_uncertainties[self.xp.newaxis, no_marg_mask]
-            )
-            log_pdf_no_marg = self.xp.where(self.xp.isnan(log_pdf_no_marg), -self.xp.inf, log_pdf_no_marg)
-            log_sum_no_marg = logsumexp_xp(self.xp, log_pdf_no_marg, axis=0) - \
-                             self.xp.log(self.xp.array(len(self.dL_gw_samples), dtype=self.xp.float64))
-            
-            no_marg_indices = self.xp.where(no_marg_mask)[0]
-            return log_sum_no_marg, no_marg_indices
-        except Exception:
-            return None
+            current_batch_size = i_batch_end - i_batch_start
+            if current_batch_size == 0:
+                continue
 
-    def _process_marginalized_galaxies_vectorized(self, model_distances, distance_uncertainties, H0, needs_marginalization):
-        """Process galaxies that need redshift marginalization in vectorized mode.
-        
-        Args:
-            model_distances: Luminosity distances for each galaxy
-            distance_uncertainties: Distance uncertainties for each galaxy
-            H0 (float): Hubble constant value
-            needs_marginalization: Boolean mask for galaxies that need marginalization
+            # Slice data for the current batch
+            # Ensure slices are used to create new arrays for JAX compatibility if modified later
+            # or if they are intermediate results that JAX might trace.
+            z_batch = self.xp.asarray(self.z_values[i_batch_start:i_batch_end])
+            z_err_batch = self.xp.asarray(self.z_err_values[i_batch_start:i_batch_end])
+            model_distances_batch_slice = self.xp.asarray(model_distances[i_batch_start:i_batch_end])
+            distance_uncertainties_batch_slice = self.xp.asarray(distance_uncertainties[i_batch_start:i_batch_end])
             
-        Returns:
-            tuple: (log_likelihoods, indices) or None if computation fails
-        """
-        marg_indices = self.xp.where(needs_marginalization)[0]
-        marg_likelihoods = []
-        
-        # Convert to Python list for iteration if JAX backend
-        if self.backend_name == "jax":
-            indices_list = [int(idx) for idx in marg_indices]
-        else:
-            indices_list = marg_indices
-        
-        for idx in indices_list:
-            # Extract scalar values for JAX compatibility
+            # Determine which galaxies in the batch need marginalization
+            needs_marginalization_mask_in_batch = z_err_batch >= self.z_err_threshold
+            no_marginalization_mask_in_batch = ~needs_marginalization_mask_in_batch
+
+            # Temporary array for this batch's results, initialized to -inf
+            batch_log_likelihoods = self.xp.full(current_batch_size, -self.xp.inf)
+
+            # --- Process galaxies in batch that DO NOT need marginalization ---
+            if self.xp.any(no_marginalization_mask_in_batch):
+                # Convert boolean mask to integer mask for indexing if needed by backend or for sum
+                num_no_marg_in_batch = self.xp.sum(no_marginalization_mask_in_batch.astype(self.xp.int32))
+                if num_no_marg_in_batch > 0:
+                    # Select data for non-marginalized galaxies in the batch
+                    model_dist_no_marg_batch = model_distances_batch_slice[no_marginalization_mask_in_batch]
+                    dist_unc_no_marg_batch = distance_uncertainties_batch_slice[no_marginalization_mask_in_batch]
+                    
+                    # Expand dimensions for broadcasting with GW samples
+                    # gw_samples_expanded shape: (N_gw_samples, 1)
+                    # model_dist_expanded shape: (1, num_no_marg_in_batch)
+                    # dist_unc_expanded shape: (1, num_no_marg_in_batch)
+                    gw_samples_expanded = self.dL_gw_samples[:, self.xp.newaxis]
+                    model_dist_expanded = model_dist_no_marg_batch[self.xp.newaxis, :]
+                    dist_unc_expanded = dist_unc_no_marg_batch[self.xp.newaxis, :]
+                    
+                    log_pdf_values_no_marg = logpdf_normal_xp(
+                        self.xp, gw_samples_expanded, loc=model_dist_expanded, scale=dist_unc_expanded
+                    ) # Shape: (N_gw_samples, num_no_marg_in_batch)
+
+                    log_pdf_values_no_marg = self.xp.where(
+                        self.xp.isnan(log_pdf_values_no_marg), -self.xp.inf, log_pdf_values_no_marg
+                    )
+                    log_sum_no_marg_results = (logsumexp_xp(self.xp, log_pdf_values_no_marg, axis=0) -
+                                             self.xp.log(self.xp.array(len(self.dL_gw_samples), dtype=self.xp.float64)))
+                    
+                    # Update batch_log_likelihoods for non-marginalized galaxies
+                    if self.backend_name == "jax":
+                        # JAX requires explicit indexing for updates
+                        true_indices_no_marg_in_batch = self.xp.where(no_marginalization_mask_in_batch)[0]
+                        batch_log_likelihoods = batch_log_likelihoods.at[true_indices_no_marg_in_batch].set(log_sum_no_marg_results)
+                    else:
+                        # NumPy allows direct boolean mask assignment
+                        batch_log_likelihoods[no_marginalization_mask_in_batch] = log_sum_no_marg_results
+            
+            # --- Process galaxies in batch that DO need marginalization ---
+            if self.xp.any(needs_marginalization_mask_in_batch):
+                num_marg_in_batch = self.xp.sum(needs_marginalization_mask_in_batch.astype(self.xp.int32))
+                if num_marg_in_batch > 0:
+                    # Select data for marginalized galaxies in the batch
+                    z_marg_batch_data = z_batch[needs_marginalization_mask_in_batch]
+                    z_err_marg_batch_data = z_err_batch[needs_marginalization_mask_in_batch]
+
+                    # Call the new batched marginalization function
+                    log_sum_marg_results = self._marginalize_batch_galaxy_redshift(
+                        H0, z_marg_batch_data, z_err_marg_batch_data
+                    )
+                    
+                    # Update batch_log_likelihoods for marginalized galaxies
+                    if self.backend_name == "jax":
+                        true_indices_marg_in_batch = self.xp.where(needs_marginalization_mask_in_batch)[0]
+                        batch_log_likelihoods = batch_log_likelihoods.at[true_indices_marg_in_batch].set(log_sum_marg_results)
+                    else:
+                        batch_log_likelihoods[needs_marginalization_mask_in_batch] = log_sum_marg_results
+                        
+            # --- Store batch results in the main array ---
             if self.backend_name == "jax":
-                model_dist = float(model_distances[idx])
+                # For JAX, use .at[].set() with an array of indices
+                batch_indices_for_jax = self.xp.arange(i_batch_start, i_batch_end, dtype=self.xp.int32)
+                log_P_data_H0_zi_terms = log_P_data_H0_zi_terms.at[batch_indices_for_jax].set(batch_log_likelihoods)
             else:
-                model_dist = model_distances[idx]
-                
-            likelihood = self._marginalize_single_galaxy_redshift_vectorized(
-                idx, model_dist, H0
-            )
-            marg_likelihoods.append(likelihood)
+                # NumPy allows direct slice assignment
+                log_P_data_H0_zi_terms[i_batch_start:i_batch_end] = batch_log_likelihoods
         
-        return self.xp.array(marg_likelihoods), marg_indices
+        # Final check for NaNs or non-finite values that might have slipped through
+        log_P_data_H0_zi_terms = self.xp.where(
+            self.xp.isnan(log_P_data_H0_zi_terms), -self.xp.inf, log_P_data_H0_zi_terms
+        )
+        log_P_data_H0_zi_terms = self.xp.where(
+            ~self.xp.isfinite(log_P_data_H0_zi_terms), -self.xp.inf, log_P_data_H0_zi_terms
+        )
+            
+        return log_P_data_H0_zi_terms
 
-    def _marginalize_single_galaxy_redshift_vectorized(self, galaxy_idx, model_distance, H0):
-        """Perform redshift marginalization for a single galaxy using vectorized quadrature.
+    def _marginalize_batch_galaxy_redshift(self, H0, z_batch_marg, z_err_batch_marg):
+        """Perform redshift marginalization for a batch of galaxies using vectorized quadrature.
         
         Args:
-            galaxy_idx (int): Index of the galaxy to marginalize
-            model_distance (float): Model luminosity distance for this galaxy
             H0 (float): Hubble constant value
+            z_batch_marg: Mean redshifts for the batch of galaxies needing marginalization (N_batch_marg,)
+            z_err_batch_marg: Redshift uncertainties for the batch (N_batch_marg,)
             
         Returns:
-            float: Marginalized log-likelihood for this galaxy
+            array: Marginalized log-likelihoods for this batch of galaxies (N_batch_marg,)
         """
-        mu_z = self.z_values[galaxy_idx]
-        sigma_z = self.z_err_values[galaxy_idx]
-        
-        # Compute integration bounds
-        z_min = self.xp.maximum(mu_z - self.z_sigma_range * sigma_z, 1e-6)
-        z_max = mu_z + self.z_sigma_range * sigma_z
-        
-        if z_max <= z_min:
-            # Fallback to point estimate
-            return self._compute_point_estimate_likelihood(model_distance)
-        
-        try:
-            return self._perform_vectorized_quadrature_integration(
-                mu_z, sigma_z, H0
-            )
-        except Exception:
-            # Integration failed - return -inf
-            return -self.xp.inf
+        N_batch_marg = len(z_batch_marg)
+        if N_batch_marg == 0:
+            # Return an empty array of the correct type if the batch is empty
+            return self.xp.array([], dtype=self.xp.float64)
 
-    def _compute_point_estimate_likelihood(self, model_distance):
-        """Compute likelihood using point estimate (no marginalization).
-        
-        Args:
-            model_distance (float): Model luminosity distance
-            
-        Returns:
-            float: Log-likelihood value
-        """
-        try:
-            sigma_d = self.xp.maximum((model_distance / self.c_val) * self.sigma_v, 1e-9)
-            log_pdf_point = logpdf_normal_xp(
-                self.xp,
-                self.dL_gw_samples,
-                loc=model_distance,
-                scale=sigma_d
-            )
-            if self.xp.any(~self.xp.isfinite(log_pdf_point)):
-                return -self.xp.inf
-            else:
-                reduced_log_pdf = logsumexp_xp(self.xp, log_pdf_point)
-                return reduced_log_pdf - self.xp.log(self.xp.array(len(self.dL_gw_samples), dtype=self.xp.float64))
-        except Exception:
-            return -self.xp.inf
+        # 1. Transform quadrature nodes to redshift domain for the batch
+        # self._quad_nodes shape: (N_quad_points,)
+        # z_batch_marg[:, self.xp.newaxis] shape: (N_batch_marg, 1)
+        # z_quad_batch shape: (N_batch_marg, N_quad_points)
+        z_quad_batch = (z_batch_marg[:, self.xp.newaxis] +
+                       self.xp.sqrt(2.0) * z_err_batch_marg[:, self.xp.newaxis] *
+                       self._quad_nodes[self.xp.newaxis, :])
 
-    def _perform_vectorized_quadrature_integration(self, mu_z, sigma_z, H0):
-        """Perform Gaussian quadrature integration for redshift marginalization.
+        # 2. Filter out negative redshifts and handle validity per galaxy
+        # valid_z_mask_batch shape: (N_batch_marg, N_quad_points)
+        # Using 1e-6 as a threshold, consistent with _scalar_comoving_distance_integral and other places
+        valid_z_mask_batch = z_quad_batch > 1e-6 
+
+        # Create a version of z_quad_batch for distance calculation.
+        # Replace non-valid z with a placeholder (e.g., 0.0 or a small positive value).
+        # The behavior of _lum_dist_model with these placeholders needs to be robust
+        # (e.g., return self.xp.inf or a very large distance that leads to ~0 likelihood).
+        # For now, using 0.0; _lum_dist_model handles z near zero.
+        z_quad_for_dist_calc = self.xp.where(valid_z_mask_batch, z_quad_batch, 0.0)
+
+        # 3. Vectorized distance computation for all (galaxy, quadrature_point) combinations
+        # model_d_quad_batch output shape expected: (N_batch_marg, N_quad_points)
+        # Note: _lum_dist_model needs to handle a 2D array of z_values correctly.
+        # If it expects 1D, this might need adjustment or a wrapper.
+        # Assuming _lum_dist_model can take (N_batch_marg, N_quad_points) and return same shape.
+        model_d_quad_batch = self._lum_dist_model(z_quad_for_dist_calc.flatten(), H0)
+        model_d_quad_batch = model_d_quad_batch.reshape(N_batch_marg, self.n_quad_points)
         
-        Args:
-            mu_z (float): Mean redshift
-            sigma_z (float): Redshift uncertainty
-            H0 (float): Hubble constant value
-            
-        Returns:
-            float: Integrated log-likelihood
-        """
-        # Transform quadrature nodes to redshift domain
-        z_quad = mu_z + self.xp.sqrt(2.0) * sigma_z * self._quad_nodes
+        # Check for valid distances (finite and positive)
+        valid_d_mask_batch = self.xp.isfinite(model_d_quad_batch) & (model_d_quad_batch > 0)
         
-        # Filter out negative redshifts
-        valid_z_mask = z_quad > 0
-        if not self.xp.any(valid_z_mask):
-            return -self.xp.inf
-        
-        z_quad_valid = z_quad[valid_z_mask]
-        quad_weights_valid = self._quad_weights[valid_z_mask]
-        
-        # Vectorized distance computation for all quadrature points
-        try:
-            model_d_quad = self._lum_dist_model(z_quad_valid, H0)
-            # Ensure it's a backend array
-            model_d_quad = self.xp.asarray(model_d_quad)
-        except Exception:
-            # Fallback to element-wise computation if vectorized fails
-            model_d_list = []
-            for z_val in z_quad_valid:
-                try:
-                    # Convert JAX array element to scalar for compatibility
-                    z_scalar = float(z_val) if self.backend_name == "jax" else z_val
-                    d_val = self._lum_dist_model(z_scalar, H0)
-                    model_d_list.append(d_val)
-                except Exception:
-                    return -self.xp.inf
-            
-            if not model_d_list:
-                return -self.xp.inf
-            model_d_quad = self.xp.array(model_d_list)
-        
-        # Check for valid distances
-        valid_d_mask = (self.xp.isfinite(model_d_quad)) & (model_d_quad > 0)
-        if not self.xp.any(valid_d_mask):
-            return -self.xp.inf
-        
-        model_d_quad_valid = model_d_quad[valid_d_mask]
-        quad_weights_final = quad_weights_valid[valid_d_mask]
-        
-        # Compute sigma_d for each quadrature point
-        sigma_d_quad = self.xp.maximum((model_d_quad_valid / self.c_val) * self.sigma_v, 1e-9)
-        
-        # Vectorized likelihood computation across quadrature points
+        # Combine validity masks: a point is valid if its redshift and derived distance are valid.
+        # overall_valid_points_mask shape: (N_batch_marg, N_quad_points)
+        overall_valid_points_mask = valid_z_mask_batch & valid_d_mask_batch
+
+        # 4. Compute sigma_d for each (galaxy, quadrature_point)
+        # sigma_d_quad_batch shape: (N_batch_marg, N_quad_points)
+        # Use model_d_quad_batch; if it was inf/nan, sigma_d will also be, and logpdf handles it.
+        sigma_d_quad_batch = self.xp.maximum((model_d_quad_batch / self.c_val) * self.sigma_v, 1e-9)
+
+        # 5. Vectorized likelihood computation (log PDF)
+        # dL_gw_samples_exp shape: (N_gw_samples, 1, 1)
+        # model_d_quad_batch_exp shape: (1, N_batch_marg, N_quad_points)
+        # sigma_d_quad_batch_exp shape: (1, N_batch_marg, N_quad_points)
         log_pdf_quad = logpdf_normal_xp(
             self.xp,
-            self.dL_gw_samples[:, self.xp.newaxis],
-            loc=model_d_quad_valid[self.xp.newaxis, :],
-            scale=sigma_d_quad[self.xp.newaxis, :]
+            self.dL_gw_samples[:, self.xp.newaxis, self.xp.newaxis], # (N_gw_samples, 1, 1)
+            loc=model_d_quad_batch[self.xp.newaxis, :, :],           # (1, N_batch_marg, N_quad_points)
+            scale=sigma_d_quad_batch[self.xp.newaxis, :, :]          # (1, N_batch_marg, N_quad_points)
+        ) # Result shape: (N_gw_samples, N_batch_marg, N_quad_points)
+
+        # Handle NaNs from logpdf_normal_xp by converting them to -inf.
+        # Also ensure any non-finite values (like +inf from a bad scale) become -inf.
+        log_pdf_quad = self.xp.where(
+            ~self.xp.isfinite(log_pdf_quad), -self.xp.inf, log_pdf_quad
         )
         
-        # Check for finite values
-        if self.xp.any(~self.xp.isfinite(log_pdf_quad)):
-            log_pdf_quad = self.xp.where(self.xp.isnan(log_pdf_quad), -self.xp.inf, log_pdf_quad)
+        # 6. Sum over GW samples (axis=0)
+        # log_likelihood_quad shape: (N_batch_marg, N_quad_points)
+        log_likelihood_quad = (logsumexp_xp(self.xp, log_pdf_quad, axis=0) -
+                             self.xp.log(self.xp.array(len(self.dL_gw_samples), dtype=self.xp.float64)))
         
-        # Sum over GW samples for each quadrature point
-        log_likelihood_quad = logsumexp_xp(self.xp, log_pdf_quad, axis=0) - \
-                             self.xp.log(self.xp.array(len(self.dL_gw_samples), dtype=self.xp.float64))
+        # Apply overall_valid_points_mask: set log_likelihood_quad to -inf for invalid integration points.
+        # This ensures that only quadrature points with valid z_quad and valid model_d_quad contribute.
+        log_likelihood_quad = self.xp.where(
+            overall_valid_points_mask, log_likelihood_quad, -self.xp.inf
+        )
+
+        # 7. Apply quadrature weights and integrate over quadrature points (axis=1)
+        # self._quad_weights shape: (N_quad_points,)
+        # log_weights_quad shape: (N_quad_points,)
+        log_weights_quad = self.xp.log(self._quad_weights / self.xp.sqrt(self.xp.pi))
         
-        # Apply quadrature weights and integrate
-        log_weights_quad = self.xp.log(quad_weights_final / self.xp.sqrt(self.xp.pi))
-        log_integrand_quad = log_weights_quad + log_likelihood_quad
+        # log_integrand_quad shape: (N_batch_marg, N_quad_points)
+        # Add log_weights_quad (broadcasted from (N_quad_points,) to (1, N_quad_points))
+        # to log_likelihood_quad (N_batch_marg, N_quad_points)
+        log_integrand_quad = log_likelihood_quad + log_weights_quad[self.xp.newaxis, :]
         
-        # Final integration using logsumexp
-        return logsumexp_xp(self.xp, log_integrand_quad)
+        # Final integration using logsumexp over quadrature axis (axis=1)
+        # marginalized_log_likelihoods_batch shape: (N_batch_marg,)
+        marginalized_log_likelihoods_batch = logsumexp_xp(self.xp, log_integrand_quad, axis=1)
+        
+        # Ensure final results are finite, replace NaNs or Infs with -self.xp.inf
+        marginalized_log_likelihoods_batch = self.xp.where(
+            ~self.xp.isfinite(marginalized_log_likelihoods_batch), 
+            -self.xp.inf, 
+            marginalized_log_likelihoods_batch
+        )
+        
+        return marginalized_log_likelihoods_batch
 
     def _compute_galaxy_likelihoods_looped(self, model_distances, distance_uncertainties, H0):
         """Compute galaxy likelihoods using memory-efficient looped approach.
@@ -1047,6 +1028,7 @@ def get_log_likelihood_h0(
     n_quad_points=DEFAULT_QUAD_POINTS,
     z_sigma_range=DEFAULT_Z_MARGINALIZATION_SIGMA_RANGE,
     force_non_vectorized=False,
+    batch_size=DEFAULT_MCMC_BATCH_SIZE,
 ):
     """Create and configure an H0LogLikelihood instance with the specified backend.
     
@@ -1060,6 +1042,8 @@ def get_log_likelihood_h0(
         host_galaxies_mass_proxy: Mass proxy values for galaxies
         host_galaxies_z_err: Redshift uncertainties for galaxies
         ... (other parameters as before)
+        force_non_vectorized (bool): If True, forces non-vectorized (now batched) path.
+        batch_size (int): Batch size for batched likelihood computation.
         
     Returns:
         H0LogLikelihood: Configured likelihood instance
@@ -1097,6 +1081,7 @@ def get_log_likelihood_h0(
         z_err_threshold=z_err_threshold,
         n_quad_points=n_quad_points,
         z_sigma_range=z_sigma_range,
+        batch_size=batch_size,
     )
 
 # Supporting data classes for cleaner interfaces
