@@ -24,20 +24,14 @@ def _is_apple_silicon_metal_available():
     """Check if JAX is installed with Metal support for Apple Silicon GPUs."""
     try:
         import jax
-        # Attempt to use the Metal backend. This usually involves checking devices.
-        # jax.devices('metal') would raise an error if Metal is not available/configured.
-        # However, a more robust check is to see if 'METAL' is in the platform string of any device.
-        # JAX might also default to Metal on M-series Macs if available.
+        
+        # Check if any device has METAL in its platform
         for device in jax.devices():
-            if "METAL" in device.platform.upper() or "GPU" in device.device_kind.upper(): # A bit more general for Apple GPUs
-                 # Check if we can actually perform a computation
-                try:
-                    # Test with float32 for device availability check
-                    _ = jax.device_put(jax.numpy.array([1.0], dtype=jax.numpy.float32), device=device).block_until_ready()
-                    return True
-                except Exception:
-                    logger.debug(f"Found Metal device ({device.platform}), but computation test failed.")
-                    return False # Found device but it's not usable
+            if "METAL" in device.platform.upper():
+                # Metal is available, but may have limitations
+                # We'll let the main backend logic handle testing
+                logger.debug(f"Metal device found: {device.platform}")
+                return True
         return False
     except Exception as e:
         logger.debug(f"JAX Metal check failed: {e}")
@@ -47,18 +41,23 @@ def _is_nvidia_cuda_available():
     """Check if JAX is installed with CUDA support for NVIDIA GPUs."""
     try:
         import jax
-        # jax.devices('cuda') or jax.devices('gpu') would error out if not available.
-        # Checking for 'CUDA' or 'NVIDIA' in platform string is safer.
+        import jax.numpy as jnp
+        
+        # Check if any device has CUDA or NVIDIA in its platform
         for device in jax.devices():
             if "CUDA" in device.platform.upper() or "NVIDIA" in device.platform.upper():
-                # Check if we can actually perform a computation
+                # For CUDA devices, do a simpler test
                 try:
-                    # Test with float32 for device availability check
-                    _ = jax.device_put(jax.numpy.array([1.0], dtype=jax.numpy.float32), device=device).block_until_ready()
-                    return True
-                except Exception:
-                    logger.debug(f"Found CUDA device ({device.platform}), but computation test failed.")
-                    return False # Found device but it's not usable
+                    # Test basic JAX functionality without device_put
+                    test_array = jnp.array([1.0, 2.0, 3.0])
+                    result = jnp.sum(test_array)
+                    # If we can create arrays and do basic operations, CUDA is working
+                    if jnp.isfinite(result):
+                        logger.debug(f"CUDA device ({device.platform}) passed basic computation test.")
+                        return True
+                except Exception as e:
+                    logger.debug(f"Found CUDA device ({device.platform}), but basic computation test failed: {e}")
+                    return False
         return False
     except Exception as e:
         logger.debug(f"JAX CUDA check failed: {e}")
@@ -105,41 +104,75 @@ def get_xp(requested_backend="auto"):
             jnp_module = importlib.import_module("jax.numpy")
             logger.info("JAX found.")
 
-            # Configure JAX for double precision (float64)
-            jax_module.config.update("jax_enable_x64", True)
-            logger.info("JAX double precision (x64) enabled.")
-
             # Check if JAX_PLATFORM_NAME is set to cpu first
             if os.environ.get("JAX_PLATFORM_NAME") == "cpu":
                 # Force CPU usage, skip GPU detection
+                # Configure JAX for double precision (float64) - CPU should support this
+                jax_module.config.update("jax_enable_x64", True)
+                logger.info("JAX double precision (x64) enabled.")
                 xp = jnp_module
                 backend_name = "jax"
                 device_name = "cpu"
                 logger.info("JAX using CPU (forced by JAX_PLATFORM_NAME=cpu).")
             elif _is_apple_silicon_metal_available():
-                device_name = "metal"
-                xp = jnp_module
-                backend_name = "jax"
-                logger.info("JAX using Apple Silicon (Metal) GPU.")
+                # Metal backend is available but may have limitations
+                # Try to use it with appropriate fallbacks
+                try:
+                    # First try without x64 mode (Metal's default)
+                    test_array = jnp_module.array([1.0, 2.0, 3.0])
+                    result = jnp_module.sum(test_array)
+                    if jnp_module.isfinite(result):
+                        # Basic operations work, now try x64 mode
+                        try:
+                            jax_module.config.update("jax_enable_x64", True)
+                            test_array_64 = jnp_module.array([1.0, 2.0, 3.0])
+                            result_64 = jnp_module.sum(test_array_64)
+                            if jnp_module.isfinite(result_64):
+                                logger.info("JAX double precision (x64) enabled.")
+                                device_name = "metal"
+                                xp = jnp_module
+                                backend_name = "jax"
+                                logger.info("JAX using Apple Silicon (Metal) GPU with float64 support.")
+                            else:
+                                raise Exception("Metal x64 test failed")
+                        except Exception:
+                            # x64 mode failed, use float32 mode
+                            jax_module.config.update("jax_enable_x64", False)
+                            device_name = "metal"
+                            xp = jnp_module
+                            backend_name = "jax"
+                            logger.warning("JAX using Apple Silicon (Metal) GPU with float32 only (x64 disabled due to Metal limitations).")
+                    else:
+                        raise Exception("Basic Metal operations failed")
+                except Exception as e:
+                    logger.warning(f"Metal backend failed: {e}. Falling back to CPU or other backends.")
+                    # Will fall through to CPU or CUDA check
             elif _is_nvidia_cuda_available():
+                # Configure JAX for double precision (float64) - CUDA should support this
+                jax_module.config.update("jax_enable_x64", True)
+                logger.info("JAX double precision (x64) enabled.")
                 device_name = "cuda"
                 xp = jnp_module
                 backend_name = "jax"
                 logger.info("JAX using NVIDIA (CUDA) GPU.")
             else:
                 # JAX on CPU (fallback)
+                # Configure JAX for double precision (float64) - CPU should support this
+                jax_module.config.update("jax_enable_x64", True)
+                logger.info("JAX double precision (x64) enabled.")
                 # Verify JAX CPU backend is functional
                 try:
-                    cpu_devices = jax_module.devices("cpu")
-                    if not cpu_devices:
-                         raise BackendNotAvailableError("JAX found but no CPU devices reported.")
-                    # Test a simple computation on JAX CPU
-                    # Test with float32 for device availability check
-                    _ = jax_module.device_put(jnp_module.array([1.0], dtype=jnp_module.float32), device=cpu_devices[0]).block_until_ready()
-                    xp = jnp_module
-                    backend_name = "jax"
-                    device_name = "cpu" # Explicitly CPU
-                    logger.info("JAX using CPU.")
+                    # Test basic JAX functionality without device_put to avoid memory space issues
+                    test_array = jnp_module.array([1.0, 2.0, 3.0])
+                    result = jnp_module.sum(test_array)
+                    # If we can create arrays and do basic operations, JAX CPU is working
+                    if jnp_module.isfinite(result):
+                        xp = jnp_module
+                        backend_name = "jax"
+                        device_name = "cpu"
+                        logger.info("JAX using CPU.")
+                    else:
+                        raise BackendNotAvailableError("JAX CPU test produced invalid result.")
                 except Exception as e:
                     logger.warning(f"JAX CPU backend test failed: {e}")
                     if requested_backend == "jax":
