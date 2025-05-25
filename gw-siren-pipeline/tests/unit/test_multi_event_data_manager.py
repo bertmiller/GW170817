@@ -37,7 +37,7 @@ def test_load_multi_event_config(tmp_path):
     assert events[1]["event_id"] == "EV2"
 
 
-def test_prepare_event_data_loads_files(tmp_path, mock_config, monkeypatch):
+def test_prepare_event_data_loads_files(tmp_path, mock_config, monkeypatch, mocker):
     dl = np.array([1.0, 2.0])
     ra = np.array([10.0, 11.0])
     dec = np.array([-1.0, -2.0])
@@ -46,9 +46,16 @@ def test_prepare_event_data_loads_files(tmp_path, mock_config, monkeypatch):
     gw_cache = tmp_path / "gw"
     cache_dir.mkdir()
     gw_cache.mkdir()
-    cache_file = cache_dir / "EV1_cat_glade+_n128_cdf0.9_zfb0.05.csv"
+    cache_file = cache_dir / "EV1_cat_glade+_n128_cdf0.95_zfb0.05.csv"
     np.savez(gw_cache / "EV1_gw_posteriors.npz", dl=dl, ra=ra, dec=dec)
     df.to_csv(cache_file, index=False)
+
+    # Mock the run_full_analysis to prevent it from trying to access real catalogs
+    results = {"dL_samples": dl, "candidate_hosts_df": df}
+    run_mock = mocker.patch(
+        "gwsiren.multi_event_data_manager.run_full_analysis",
+        return_value=results,
+    )
 
     me_cfg = MultiEventAnalysisSettings(
         run_settings=MERunSettings(
@@ -73,6 +80,8 @@ def test_prepare_event_data_loads_files(tmp_path, mock_config, monkeypatch):
     assert isinstance(package, EventDataPackage)
     assert np.allclose(package.dl_samples, dl)
     pd.testing.assert_frame_equal(package.candidate_galaxies_df, df)
+    # Since cache file exists, run_full_analysis should not be called
+    run_mock.assert_not_called()
 
 
 def test_prepare_event_data_generation_path(tmp_path, mock_config, monkeypatch, mocker):
@@ -157,7 +166,7 @@ def test_candidate_galaxy_cache(tmp_path, mock_config, mocker, monkeypatch):
     # First call generates and writes to cache
     package1 = prepare_event_data(cfg)
     run_mock.assert_called_once()
-    cached = cache_dir / "EVX_cat_glade+_n128_cdf0.9_zfb0.05.csv"
+    cached = cache_dir / "EVX_cat_glade+_n128_cdf0.95_zfb0.05.csv"
     assert cached.exists()
 
     # Second call should load from cache
