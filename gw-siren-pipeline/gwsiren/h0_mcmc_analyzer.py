@@ -8,6 +8,7 @@ from gwsiren import CONFIG
 from gwsiren.backends import get_xp, logpdf_normal_xp, logsumexp_xp, trapz_xp
 from gwsiren.distance_cache import create_distance_cache
 from dataclasses import dataclass
+import types # For types.ModuleType, if not already imported
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,118 @@ _jitted_static_lum_dist = jax.jit(
     static_argnames=('xp_module', 'c_val', 'omega_m_val', 'N_trapz', '_scalar_integral_fn_to_call')
 )
 
+def _core_static_marginalize_one_galaxy_jax(
+    xp_module: types.ModuleType,
+    H0_val_jnp: jax.numpy.ndarray,
+    mu_z_scalar_jnp: jax.numpy.ndarray,
+    sigma_z_scalar_jnp: jax.numpy.ndarray,
+    dL_gw_samples_jnp: jax.numpy.ndarray,
+    _quad_nodes_jnp: jax.numpy.ndarray,
+    _quad_weights_jnp: jax.numpy.ndarray,
+    c_val: float,
+    sigma_v_val: float,
+    omega_m_val: float, 
+    _jitted_lum_dist_calculator_func: callable,
+    _jitted_comoving_integral_func: callable,
+    z_sigma_range: float, # Unused in this direct implementation, but kept for signature consistency if needed later
+    N_trapz_lum_dist: int
+) -> jax.numpy.ndarray:
+    """
+    Performs redshift marginalization for a single galaxy using JAX logic.
+    This is a pure, static function not intended for direct JIT compilation itself in this step.
+    It uses a pre-jitted luminosity distance calculator.
+    """
+    # Ensure backend functions are accessible if they were imported conditionally or aliased
+    # For example, if logpdf_normal_xp and logsumexp_xp are module-level in backends.py
+    # and backends.py is imported as `backends_module`, then:
+    # logpdf_normal_xp_func = backends_module.logpdf_normal_xp
+    # logsumexp_xp_func = backends_module.logsumexp_xp
+    # For simplicity, assuming direct availability based on typical import patterns in the file.
+    # If this function is moved or backends.py has complex aliasing, this might need adjustment.
+    
+    # Transform quadrature nodes: z_j = mu_z + sqrt(2) * sigma_z * x_i
+    # x_i are the _quad_nodes_jnp
+    z_j_array = mu_z_scalar_jnp + xp_module.sqrt(2.0) * sigma_z_scalar_jnp * _quad_nodes_jnp
+    
+    # Filter out non-positive z_j values
+    valid_z_mask_for_quad = z_j_array > 1e-6 # Small epsilon to avoid issues at exactly zero
+    
+    # Create z_j for distance calculation, replacing invalid points with 0 (or another suitable placeholder)
+    # The lum_dist calculator should handle z=0 appropriately (e.g., returning 0 distance or handling the integral).
+    z_j_for_dist_calc = xp_module.where(valid_z_mask_for_quad, z_j_array, 0.0)
+
+    # Call the JITted luminosity distance function
+    # _jitted_static_lum_dist expects: 
+    # (xp_module, c_val, omega_m_val, H0_val, z_values_backend_array, N_trapz, _scalar_integral_fn_to_call)
+    # Here, z_values_backend_array is z_j_for_dist_calc (shape (N_quad_points,))
+    # H0_val is H0_val_jnp (scalar)
+    model_d_at_quad_nodes = _jitted_lum_dist_calculator_func(
+        xp_module, 
+        c_val, 
+        omega_m_val, 
+        H0_val_jnp, 
+        z_j_for_dist_calc, 
+        N_trapz_lum_dist, 
+        _jitted_comoving_integral_func
+    )
+
+    # Create a mask for valid distances (finite and positive)
+    valid_d_mask = xp_module.isfinite(model_d_at_quad_nodes) & (model_d_at_quad_nodes > 0.0)
+    
+    # Combine masks: points are overall valid if their redshift and resulting distance are valid
+    overall_valid_points_mask = valid_z_mask_for_quad & valid_d_mask
+    
+    # Calculate sigma_d (uncertainty in dL_model due to peculiar velocities)
+    # sigma_d = (dL_model / c) * sigma_v
+    # Add a small epsilon to avoid division by zero if model_d_at_quad_nodes is zero,
+    # or if sigma_d becomes exactly zero, which can be problematic for logpdf_normal.
+    sigma_d_at_quad_nodes = xp_module.maximum((model_d_at_quad_nodes / c_val) * sigma_v_val, 1e-9)
+
+    # Expand dimensions for broadcasting in logpdf_normal_xp
+    # dL_gw_samples_jnp: (N_gw_samples,) -> (N_gw_samples, 1)
+    # model_d_at_quad_nodes: (N_quad_points,) -> (1, N_quad_points)
+    # sigma_d_at_quad_nodes: (N_quad_points,) -> (1, N_quad_points)
+    dL_gw_samples_expanded = dL_gw_samples_jnp[:, xp_module.newaxis]
+    model_d_expanded = model_d_at_quad_nodes[xp_module.newaxis, :]
+    sigma_d_expanded = sigma_d_at_quad_nodes[xp_module.newaxis, :]
+    
+    # Calculate log PDF values: log p(dL_gw | dL_model(z_j, H0), sigma_d(z_j, H0))
+    # logpdf_normal_xp(xp_module, x, loc, scale)
+    log_pdf_values = logpdf_normal_xp(xp_module, dL_gw_samples_expanded, loc=model_d_expanded, scale=sigma_d_expanded)
+    # log_pdf_values shape: (N_gw_samples, N_quad_points)
+
+    # Handle NaNs in log_pdf_values by replacing them with -inf
+    log_pdf_values = xp_module.where(~xp_module.isfinite(log_pdf_values), -xp_module.inf, log_pdf_values)
+    
+    # Average likelihood over GW samples (marginalize over dL_gw samples)
+    # log L(H0 | z_j) = log [ (1/N_gw) * sum_k p(dL_gw_k | z_j, H0) ]
+    #                = logsumexp_k [ log p(dL_gw_k | z_j, H0) ] - log(N_gw)
+    num_gw_samples = xp_module.array(len(dL_gw_samples_jnp), dtype=xp_module.float64) # Ensure float for log
+    log_likelihood_at_quad_nodes = logsumexp_xp(xp_module, log_pdf_values, axis=0) - xp_module.log(num_gw_samples)
+    # log_likelihood_at_quad_nodes shape: (N_quad_points,)
+
+    # Apply the overall validity mask to the log-likelihoods at each quadrature node
+    # Set log-likelihood to -inf for invalid points
+    log_likelihood_at_quad_nodes = xp_module.where(
+        overall_valid_points_mask, 
+        log_likelihood_at_quad_nodes, 
+        -xp_module.inf
+    )
+
+    # Prepare the integrand for Gaussian quadrature
+    # Integrand = L(H0 | z_j) * p(z_j | mu_z, sigma_z)
+    # In log space, for Gauss-Hermite:
+    # log_integrand = log L(H0 | z_j) + log(w_i / sqrt(pi))
+    # where w_i are the _quad_weights_jnp
+    log_integrand = log_likelihood_at_quad_nodes + xp_module.log(_quad_weights_jnp / xp_module.sqrt(xp_module.pi))
+    
+    # Perform the final marginalization over redshift using logsumexp for numerical stability
+    # log L_gal(H0) = log sum_j [ exp(log_integrand_j) ]
+    #               = logsumexp_j [ log_integrand_j ]
+    marginalized_log_L = logsumexp_xp(xp_module, log_integrand, axis=0) # axis=0 sums over N_quad_points
+    
+    return marginalized_log_L
+
 class H0LogLikelihood:
     """Log-likelihood for joint inference of ``H0`` and ``alpha``.
 
@@ -136,11 +249,11 @@ class H0LogLikelihood:
         """Initialize H0LogLikelihood with backend-agnostic computation setup.
         
         Args:
-            xp: Backend computation module (numpy or jax.numpy)
-            backend_name: Name of the backend ("numpy" or "jax")
-            dL_gw_samples: GW luminosity distance samples
-            host_galaxies_z: Host galaxy redshifts
-            host_galaxies_mass_proxy: Galaxy mass proxy values
+            xp: Backend computation module
+            backend_name: Name of the backend
+            dL_gw_samples: GW distance samples
+            host_galaxies_z: Host redshifts  
+            host_galaxies_mass_proxy: Mass proxy values
             host_galaxies_z_err: Redshift uncertainties
             ... (other parameters as before)
         """

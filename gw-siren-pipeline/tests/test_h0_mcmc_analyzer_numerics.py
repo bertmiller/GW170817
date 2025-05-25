@@ -560,3 +560,118 @@ def test_h0_distance_cache_accuracy_when_source_is_jax():
     
     # Clean up for subsequent tests if any
     analyzer_instance_jax.clear_distance_cache() 
+
+# <<< START OF NEW TEST FUNCTION >>>
+@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX not installed or not configured")
+def test_core_static_marginalize_one_galaxy_jax_accuracy():
+    """
+    Tests the _core_static_marginalize_one_galaxy_jax function for numerical accuracy
+    against the NumPy-based looped marginalization for a single galaxy.
+    """
+    if not JAX_AVAILABLE:
+        pytest.skip("JAX not available")
+
+    global jnp # Ensure jnp is accessible
+    from gwsiren import h0_mcmc_analyzer # To access module-level jitted functions
+    from gwsiren.h0_mcmc_analyzer import _core_static_marginalize_one_galaxy_jax, DEFAULT_C_LIGHT, DEFAULT_OMEGA_M, DEFAULT_SIGMA_V_PEC
+    # Assuming CONFIG is available or use default values directly if not easily mockable here
+    # from gwsiren import CONFIG # May not be needed if we use defaults
+
+    # Test Parameters
+    H0_test = 70.0
+    mu_z_test = 0.05
+    sigma_z_test = 0.005
+    # Using fixed seed for reproducibility of random dL samples
+    np.random.seed(42)
+    dL_gw_samples_np = np.random.normal(loc=220, scale=20, size=100).astype(np.float64)
+    
+    c_val_test = DEFAULT_C_LIGHT
+    sigma_v_val_test = DEFAULT_SIGMA_V_PEC 
+    omega_m_val_test = DEFAULT_OMEGA_M
+    # These are often from H0LogLikelihood instance or CONFIG
+    # Use H0LogLikelihood defaults if available for n_quad_points and z_sigma_range
+    n_quad_points_test = h0_mcmc_analyzer.DEFAULT_QUAD_POINTS 
+    z_sigma_range_test = h0_mcmc_analyzer.DEFAULT_Z_MARGINALIZATION_SIGMA_RANGE
+    N_trapz_lum_dist_test = 200 # A common default for N_trapz in lum_dist calculations
+
+    # --- Setup NumPy based H0LogLikelihood for reference calculation ---
+    # Dummy galaxy data for instantiation, only one galaxy will be effectively tested by calling _marginalize_single_galaxy_redshift_looped
+    dummy_host_galaxies_z = np.array([mu_z_test, 0.1]) # Need at least one, can be more
+    dummy_host_galaxies_mass_proxy = np.array([1.0, 1.0])
+    dummy_host_galaxies_z_err = np.array([sigma_z_test, 0.01])
+
+    analyzer_numpy = H0LogLikelihood(
+        xp=np,
+        backend_name="numpy",
+        dL_gw_samples=dL_gw_samples_np,
+        host_galaxies_z=dummy_host_galaxies_z, # mu_z_test is first element
+        host_galaxies_mass_proxy=dummy_host_galaxies_mass_proxy,
+        host_galaxies_z_err=dummy_host_galaxies_z_err, # sigma_z_test is first element
+        c_val=c_val_test,
+        sigma_v=sigma_v_val_test,
+        omega_m_val=omega_m_val_test,
+        n_quad_points=n_quad_points_test,
+        z_sigma_range=z_sigma_range_test
+        # Other params like h0_min/max, alpha_min/max are not directly relevant for this specific internal method call
+    )
+    # The _marginalize_single_galaxy_redshift_looped uses instance quad nodes/weights
+    # and other parameters set during __init__.
+
+    # --- Reference Value from NumPy path ---
+    # _marginalize_single_galaxy_redshift_looped internally calls _perform_looped_quadrature_integration
+    # It uses the instance's self.dL_gw_samples, self._quad_nodes, self._quad_weights etc.
+    # It takes mu_z, sigma_z for *one specific galaxy* and H0.
+    reference_logL = analyzer_numpy._marginalize_single_galaxy_redshift_looped(mu_z_test, sigma_z_test, H0_test)
+    print(f"Reference NumPy LogL: {reference_logL}")
+
+    # --- Prepare JAX inputs ---
+    H0_jnp = jnp.array(H0_test, dtype=jnp.float64)
+    mu_z_jnp = jnp.array(mu_z_test, dtype=jnp.float64)
+    sigma_z_jnp = jnp.array(sigma_z_test, dtype=jnp.float64)
+    dL_gw_samples_jnp = jnp.array(dL_gw_samples_np, dtype=jnp.float64)
+    
+    # Get quad nodes and weights from the numpy analyzer instance (they are generated in __init__)
+    # and convert them to JAX arrays. These are Gauss-Hermite nodes/weights.
+    quad_nodes_np = analyzer_numpy._quad_nodes
+    quad_weights_np = analyzer_numpy._quad_weights
+    quad_nodes_jnp = jnp.array(quad_nodes_np, dtype=jnp.float64)
+    quad_weights_jnp = jnp.array(quad_weights_np, dtype=jnp.float64)
+
+    # Get the JITted luminosity distance function and comoving integral function
+    # These are module-level functions in h0_mcmc_analyzer.py
+    jitted_lum_dist_func = h0_mcmc_analyzer._jitted_static_lum_dist
+    jitted_comoving_integral_func = h0_mcmc_analyzer._jitted_static_comoving_integral
+
+    # --- Execute JAX based static function ---
+    pipeline_logL_jax = _core_static_marginalize_one_galaxy_jax(
+        jnp, 
+        H0_jnp, 
+        mu_z_jnp, 
+        sigma_z_jnp, 
+        dL_gw_samples_jnp, 
+        quad_nodes_jnp, 
+        quad_weights_jnp, 
+        c_val_test, 
+        sigma_v_val_test, 
+        omega_m_val_test, 
+        jitted_lum_dist_func, 
+        jitted_comoving_integral_func,
+        z_sigma_range_test, # Passed for signature, though not used in current JAX func impl
+        N_trapz_lum_dist_test
+    )
+    pipeline_logL_np = np.array(pipeline_logL_jax) # Convert JAX output to NumPy
+    print(f"Pipeline JAX LogL (converted to np): {pipeline_logL_np}")
+
+    # --- Assertions ---
+    assert np.isfinite(pipeline_logL_np), f"Pipeline JAX logL is not finite: {pipeline_logL_np}"
+    assert np.isfinite(reference_logL), f"Reference NumPy logL is not finite: {reference_logL}"
+    
+    # Check if both are -inf (can happen if all likelihoods are too small)
+    if np.isneginf(reference_logL) and np.isneginf(pipeline_logL_np):
+        pass # Both are -inf, considered close enough
+    else:
+        assert np.allclose(pipeline_logL_np, reference_logL, rtol=1e-5, atol=1e-8), \
+            f"Mismatch between JAX pipeline LogL and NumPy reference LogL.\n" \
+            f"JAX: {pipeline_logL_np}, NumPy: {reference_logL}, Diff: {pipeline_logL_np - reference_logL}"
+
+# <<< END OF NEW TEST FUNCTION >>> 
