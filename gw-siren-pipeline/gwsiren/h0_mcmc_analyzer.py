@@ -742,115 +742,113 @@ class H0LogLikelihood:
         return log_sum_over_gw_samples
 
     def _compute_galaxy_likelihoods_batched(self, model_distances, distance_uncertainties, H0):
-        """Compute galaxy likelihoods using a batched and vectorized approach.
-        
-        Args:
-            model_distances: Luminosity distances for each galaxy (N_total_hosts,)
-            distance_uncertainties: Distance uncertainties for each galaxy (N_total_hosts,)
-            H0 (float): Hubble constant value
-            
-        Returns:
-            array: Log-likelihood contribution for each galaxy, or None if computation fails
         """
-        n_total_hosts = len(self.z_values)
-        # Initialize with a value indicating failure or uncomputed, like -inf
-        log_P_data_H0_zi_terms = self.xp.full(n_total_hosts, -self.xp.inf)
+        Computes galaxy likelihoods in batches.
+        This version processes galaxies in batches, separating those that need
+        redshift marginalization from those that don't.
+        """
+        num_hosts = len(self.z_values) # Corrected attribute
+        log_P_data_H0_zi_terms = self.xp.full(num_hosts, -self.xp.inf, dtype=self.xp.float64)
+        
+        fixed_jit_batch_size = self.batch_size # For JAX padding
 
-        for i_batch_start in range(0, n_total_hosts, self.batch_size):
-            i_batch_end = min(i_batch_start + self.batch_size, n_total_hosts)
-            
-            current_batch_size = i_batch_end - i_batch_start
-            if current_batch_size == 0:
-                continue
+        for i in range(0, num_hosts, self.batch_size):
+            batch_start = i
+            batch_end = min(i + self.batch_size, num_hosts)
+            current_actual_batch_size = batch_end - batch_start
 
             # Slice data for the current batch
-            # Ensure slices are used to create new arrays for JAX compatibility if modified later
-            # or if they are intermediate results that JAX might trace.
-            z_batch = self.xp.asarray(self.z_values[i_batch_start:i_batch_end])
-            z_err_batch = self.xp.asarray(self.z_err_values[i_batch_start:i_batch_end])
-            model_distances_batch_slice = self.xp.asarray(model_distances[i_batch_start:i_batch_end])
-            distance_uncertainties_batch_slice = self.xp.asarray(distance_uncertainties[i_batch_start:i_batch_end])
+            batch_indices = self.xp.arange(batch_start, batch_end)
+            batch_z = self.z_values[batch_indices] # Corrected attribute
+            batch_z_err = self.z_err_values[batch_indices] # Corrected attribute
+            batch_model_d = model_distances[batch_indices]
+            batch_dist_unc = distance_uncertainties[batch_indices]
             
-            # Determine which galaxies in the batch need marginalization
-            needs_marginalization_mask_in_batch = z_err_batch >= self.z_err_threshold
-            no_marginalization_mask_in_batch = ~needs_marginalization_mask_in_batch
+            # Identify galaxies needing marginalization in this batch
+            needs_marginalization_mask_batch = batch_z_err > self.z_err_threshold
+            
+            # --- Process galaxies NOT needing marginalization ---
+            no_marg_mask_batch = ~needs_marginalization_mask_batch
+            num_no_marginalized_in_batch = self.xp.sum(no_marg_mask_batch).item()
 
-            # Temporary array for this batch's results, initialized to -inf
-            batch_log_likelihoods = self.xp.full(current_batch_size, -self.xp.inf)
+            if num_no_marginalized_in_batch > 0:
+                z_no_marg_batch_data = batch_z[no_marg_mask_batch]
+                # For these, model_d and dist_unc are directly used from the batch slices
+                model_d_no_marg_batch = batch_model_d[no_marg_mask_batch]
+                dist_unc_no_marg_batch = batch_dist_unc[no_marg_mask_batch]
+                
+                # Simple likelihood calculation
+                # Note: _compute_simple_vectorized_likelihoods expects full arrays of dL_gw_samples,
+                # model_distances (for these galaxies), and distance_uncertainties (for these galaxies).
+                # It's designed to operate on a subset of galaxies but with the full dL_gw_samples.
+                # This structure assumes model_d_no_marg_batch and dist_unc_no_marg_batch are 
+                # correctly shaped for broadcasting with self.dL_gw_samples within the helper.
+                results_for_no_marg_batch = self._compute_simple_vectorized_likelihoods(
+                    model_d_no_marg_batch, dist_unc_no_marg_batch
+                )
+                # Place results back into the correct positions in the full array
+                original_indices_no_marg = batch_indices[no_marg_mask_batch]
+                log_P_data_H0_zi_terms = self._update_array_element(
+                    log_P_data_H0_zi_terms, original_indices_no_marg, results_for_no_marg_batch
+                )
 
-            # --- Process galaxies in batch that DO NOT need marginalization ---
-            if self.xp.any(no_marginalization_mask_in_batch):
-                # Convert boolean mask to integer mask for indexing if needed by backend or for sum
-                num_no_marg_in_batch = self.xp.sum(no_marginalization_mask_in_batch.astype(self.xp.int32))
-                if num_no_marg_in_batch > 0:
-                    # Select data for non-marginalized galaxies in the batch
-                    model_dist_no_marg_batch = model_distances_batch_slice[no_marginalization_mask_in_batch]
-                    dist_unc_no_marg_batch = distance_uncertainties_batch_slice[no_marginalization_mask_in_batch]
+            # --- Process galaxies NEEDING marginalization ---
+            marg_mask_batch = needs_marginalization_mask_batch
+            original_num_marginalized_in_batch = self.xp.sum(marg_mask_batch).item()
+
+            if original_num_marginalized_in_batch > 0:
+                z_marg_batch_data = batch_z[marg_mask_batch]
+                z_err_marg_batch_data = batch_z_err[marg_mask_batch]
+                
+                if self.backend_name == "jax":
+                    # JAX Path with padding
+                    padded_z_marg_batch = z_marg_batch_data
+                    padded_z_err_marg_batch = z_err_marg_batch_data
+
+                    if original_num_marginalized_in_batch < fixed_jit_batch_size:
+                        num_to_pad = fixed_jit_batch_size - original_num_marginalized_in_batch
+                        # Pad z_marg_batch_data. Use 0.0 as padding.
+                        # Ensure padding value is compatible with JAX array type.
+                        padding_config_z = ((0, num_to_pad),) # Pad only at the end of the array
+                        padded_z_marg_batch = self.xp.pad(
+                            z_marg_batch_data, 
+                            padding_config_z, 
+                            mode='constant', 
+                            constant_values=0.0
+                        )
+                        # Pad z_err_marg_batch_data. Use a small positive value for sigma_z.
+                        padded_z_err_marg_batch = self.xp.pad(
+                            z_err_marg_batch_data, 
+                            padding_config_z, # Same padding amount and dimensions
+                            mode='constant', 
+                            constant_values=1e-3 # Small positive sigma_z
+                        )
                     
-                    # Expand dimensions for broadcasting with GW samples
-                    # gw_samples_expanded shape: (N_gw_samples, 1)
-                    # model_dist_expanded shape: (1, num_no_marg_in_batch)
-                    # dist_unc_expanded shape: (1, num_no_marg_in_batch)
-                    gw_samples_expanded = self.dL_gw_samples[:, self.xp.newaxis]
-                    model_dist_expanded = model_dist_no_marg_batch[self.xp.newaxis, :]
-                    dist_unc_expanded = dist_unc_no_marg_batch[self.xp.newaxis, :]
-                    
-                    log_pdf_values_no_marg = logpdf_normal_xp(
-                        self.xp, gw_samples_expanded, loc=model_dist_expanded, scale=dist_unc_expanded
-                    ) # Shape: (N_gw_samples, num_no_marg_in_batch)
-
-                    log_pdf_values_no_marg = self.xp.where(
-                        self.xp.isnan(log_pdf_values_no_marg), -self.xp.inf, log_pdf_values_no_marg
+                    # Call with potentially padded data
+                    results_for_marg_batch_padded = self._marginalize_batch_galaxy_redshift(
+                        H0, padded_z_marg_batch, padded_z_err_marg_batch
                     )
-                    log_sum_no_marg_results = (logsumexp_xp(self.xp, log_pdf_values_no_marg, axis=0) -
-                                             self.xp.log(self.xp.array(len(self.dL_gw_samples), dtype=self.xp.float64)))
-                    
-                    # Update batch_log_likelihoods for non-marginalized galaxies
-                    if self.backend_name == "jax":
-                        # JAX requires explicit indexing for updates
-                        true_indices_no_marg_in_batch = self.xp.where(no_marginalization_mask_in_batch)[0]
-                        batch_log_likelihoods = batch_log_likelihoods.at[true_indices_no_marg_in_batch].set(log_sum_no_marg_results)
-                    else:
-                        # NumPy allows direct boolean mask assignment
-                        batch_log_likelihoods[no_marginalization_mask_in_batch] = log_sum_no_marg_results
-            
-            # --- Process galaxies in batch that DO need marginalization ---
-            if self.xp.any(needs_marginalization_mask_in_batch):
-                num_marg_in_batch = self.xp.sum(needs_marginalization_mask_in_batch.astype(self.xp.int32))
-                if num_marg_in_batch > 0:
-                    # Select data for marginalized galaxies in the batch
-                    z_marg_batch_data = z_batch[needs_marginalization_mask_in_batch]
-                    z_err_marg_batch_data = z_err_batch[needs_marginalization_mask_in_batch]
-
-                    # Call the new batched marginalization function
-                    log_sum_marg_results = self._marginalize_batch_galaxy_redshift(
+                    # Slice to get the true results
+                    true_results_marg = results_for_marg_batch_padded[:original_num_marginalized_in_batch]
+                
+                else: # NumPy path (or other non-JAX backends)
+                    true_results_marg = self._marginalize_batch_galaxy_redshift(
                         H0, z_marg_batch_data, z_err_marg_batch_data
                     )
-                    
-                    # Update batch_log_likelihoods for marginalized galaxies
-                    if self.backend_name == "jax":
-                        true_indices_marg_in_batch = self.xp.where(needs_marginalization_mask_in_batch)[0]
-                        batch_log_likelihoods = batch_log_likelihoods.at[true_indices_marg_in_batch].set(log_sum_marg_results)
-                    else:
-                        batch_log_likelihoods[needs_marginalization_mask_in_batch] = log_sum_marg_results
-                        
-            # --- Store batch results in the main array ---
-            if self.backend_name == "jax":
-                # For JAX, use .at[].set() with an array of indices
-                batch_indices_for_jax = self.xp.arange(i_batch_start, i_batch_end, dtype=self.xp.int32)
-                log_P_data_H0_zi_terms = log_P_data_H0_zi_terms.at[batch_indices_for_jax].set(batch_log_likelihoods)
-            else:
-                # NumPy allows direct slice assignment
-                log_P_data_H0_zi_terms[i_batch_start:i_batch_end] = batch_log_likelihoods
-        
-        # Final check for NaNs or non-finite values that might have slipped through
-        log_P_data_H0_zi_terms = self.xp.where(
-            self.xp.isnan(log_P_data_H0_zi_terms), -self.xp.inf, log_P_data_H0_zi_terms
-        )
-        log_P_data_H0_zi_terms = self.xp.where(
-            ~self.xp.isfinite(log_P_data_H0_zi_terms), -self.xp.inf, log_P_data_H0_zi_terms
-        )
+
+                # Place results back
+                original_indices_marg = batch_indices[marg_mask_batch]
+                log_P_data_H0_zi_terms = self._update_array_element(
+                    log_P_data_H0_zi_terms, original_indices_marg, true_results_marg
+                )
             
+            # Handle case where the batch for marginalization might be empty but JIT requires fixed size.
+            # This is now handled by the padding logic above: if original_num_marginalized_in_batch is 0,
+            # _marginalize_batch_galaxy_redshift will not be called.
+            # If it were to be called with 0 original items but then padded up to fixed_jit_batch_size,
+            # the slicing [:original_num_marginalized_in_batch] would correctly yield an empty array.
+            # However, the current logic correctly skips the call if original_num_marginalized_in_batch == 0.
+
         return log_P_data_H0_zi_terms
 
     def _marginalize_batch_galaxy_redshift(self, H0, z_batch_marg, z_err_batch_marg):
