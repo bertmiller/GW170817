@@ -79,6 +79,21 @@ _jitted_static_comoving_integral = jax.jit(
     static_argnames=('xp_module', 'N_trapz')
 )
 
+# Static helper function for JIT compilation of lum_dist_model_uncached logic
+def _static_lum_dist_calculator_for_jit(xp_module, c_val, omega_m_val, H0_val, z_values_backend_array, N_trapz, _scalar_integral_fn_to_call):
+    """Core logic for luminosity distance calculation for JIT.
+    Assumes H0_val is valid and z_values_backend_array is already a backend array.
+    """
+    dc_integrals_list = [_scalar_integral_fn_to_call(xp_module, omega_m_val, z_val, N_trapz) for z_val in z_values_backend_array]
+    dc_integrals = xp_module.asarray(dc_integrals_list, dtype=xp_module.float64)
+    lum_dist = (c_val / H0_val) * (1.0 + z_values_backend_array) * dc_integrals
+    return lum_dist
+
+_jitted_static_lum_dist = jax.jit(
+    _static_lum_dist_calculator_for_jit,
+    static_argnames=('xp_module', 'c_val', 'omega_m_val', 'N_trapz', '_scalar_integral_fn_to_call')
+)
+
 class H0LogLikelihood:
     """Log-likelihood for joint inference of ``H0`` and ``alpha``.
 
@@ -327,20 +342,35 @@ class H0LogLikelihood:
         This is the original computation that the cache will use to build
         interpolation tables. Should not be called directly - use _lum_dist_model instead.
         """
-        is_scalar_input = (self.xp.asarray(z_values).ndim == 0)
-        z_input_arr = self.xp.atleast_1d(z_values)
+        # Ensure z_values is an array and determine if original input was scalar
+        z_input_asarray = self.xp.asarray(z_values)
+        is_scalar_input = (z_input_asarray.ndim == 0)
+        z_input_arr = self.xp.atleast_1d(z_input_asarray) # Work with at least 1D array
 
         if H0_val < 1e-9: # Avoid division by zero for H0
-            return self.xp.full_like(z_input_arr, self.xp.inf, dtype=self.xp.float64)
+            return self.xp.full_like(z_input_arr, self.xp.inf, dtype=self.xp.float64)[0] if is_scalar_input else self.xp.full_like(z_input_arr, self.xp.inf, dtype=self.xp.float64)
 
-        dc_integrals_list = [self._scalar_comoving_distance_integral(z_val, N_trapz) for z_val in z_input_arr]
-        dc_integrals = self.xp.asarray(dc_integrals_list, dtype=self.xp.float64)
-
-        lum_dist = (self.c_val / H0_val) * (1.0 + z_input_arr) * dc_integrals
+        if self.backend_name == "jax":
+            # Call the JITted static function for JAX backend
+            result_arr = _jitted_static_lum_dist(
+                self.xp, 
+                self.c_val, 
+                self.omega_m_val, 
+                H0_val, 
+                z_input_arr, 
+                N_trapz, 
+                _jitted_static_comoving_integral # Pass the JITted scalar integral function
+            )
+        else:
+            # Original logic for NumPy backend (or other non-JAX backends)
+            dc_integrals_list = [self._scalar_comoving_distance_integral(z_val, N_trapz) for z_val in z_input_arr]
+            dc_integrals = self.xp.asarray(dc_integrals_list, dtype=self.xp.float64)
+            result_arr = (self.c_val / H0_val) * (1.0 + z_input_arr) * dc_integrals
         
-        if is_scalar_input and lum_dist.ndim > 0: # Ensure output matches input shape
-            return lum_dist[0]
-        return lum_dist
+        # Handle scalar input: if original z_values was scalar, return a scalar
+        if is_scalar_input:
+            return result_arr[0] 
+        return result_arr
 
     def _lum_dist_model(self, z_values, H0_val, N_trapz=200):
         """Compute luminosity distance for z_values (array or scalar) and H0_val.
