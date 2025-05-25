@@ -90,7 +90,7 @@ def execute_multi_event_analysis() -> None:
         sigma_v=sigma_v,
         c_val=c_light,
         omega_m_val=omega_m,
-        force_non_vectorized=True,  # Force non-vectorized for better performance with many galaxies
+        # force_non_vectorized=True,
     )
 
     mcmc_cfg: MEMCMCConfig | None = me_settings.mcmc
