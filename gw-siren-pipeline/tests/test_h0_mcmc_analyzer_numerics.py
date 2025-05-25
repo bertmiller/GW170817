@@ -3,6 +3,15 @@ import pytest
 from astropy.cosmology import FlatLambdaCDM
 from astropy import units as u
 
+# Try to import JAX and configure, skip JAX tests if not available
+try:
+    import jax
+    import jax.numpy as jnp
+    jax.config.update("jax_enable_x64", True)
+    JAX_AVAILABLE = True
+except ImportError:
+    JAX_AVAILABLE = False
+
 # Assuming h0_mcmc_analyzer is structured such that H0LogLikelihood can be imported
 # Adjust the import path as necessary based on your project structure.
 # For example, if gw-siren-pipeline is the root of a package 'gwsiren':
@@ -333,3 +342,221 @@ def test_h0_distance_cache_accuracy_numpy():
     
     # Clean up for subsequent tests if any
     analyzer_instance.clear_distance_cache() 
+
+# --- Test for _scalar_comoving_distance_integral (JAX Backend) --- 
+
+@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX not installed or not configured")
+def test_scalar_comoving_distance_integral_jax_stability_and_accuracy():
+    """
+    Tests _scalar_comoving_distance_integral with JAX backend.
+    """
+    # Ensure JAX is imported and configured if this test runs
+    # This is mostly for clarity, as JAX_AVAILABLE handles the skip
+    if not JAX_AVAILABLE:
+        pytest.skip("JAX not available")
+    
+    # jnp should be defined globally if JAX_AVAILABLE is True
+    global jnp
+
+    omega_m_test_jax = 0.3 # Same as NumPy test for this function
+    
+    # Dummy data for H0LogLikelihood instantiation (NumPy arrays are fine, converted internally)
+    dummy_dL_gw_samples = np.array([100.0, 150.0])
+    dummy_host_galaxies_z = np.array([0.01, 0.02])
+    dummy_host_galaxies_mass_proxy = np.array([1.0, 1.0])
+    dummy_host_galaxies_z_err = np.array([0.001, 0.001])
+
+    analyzer_instance_jax = H0LogLikelihood(
+        xp=jnp, # Use jax.numpy
+        backend_name="jax",
+        dL_gw_samples=dummy_dL_gw_samples,
+        host_galaxies_z=dummy_host_galaxies_z,
+        host_galaxies_mass_proxy=dummy_host_galaxies_mass_proxy,
+        host_galaxies_z_err=dummy_host_galaxies_z_err,
+        omega_m_val=omega_m_test_jax,
+        c_val=DEFAULT_C_LIGHT,
+        h0_min=10, h0_max=200,
+        alpha_min=-1, alpha_max=1
+    )
+
+    test_redshifts = [0.0, 1e-9, 0.001, 0.01, 0.1, 0.5, 1.0, 2.0, 2.9]
+    N_trapz_test_values = [200, 500] # Default N_trapz in _scalar_comoving_distance_integral is 200
+
+    for z_val in test_redshifts:
+        for n_trapz in N_trapz_test_values:
+            pipeline_integral_val_jax = analyzer_instance_jax._scalar_comoving_distance_integral(z_val, N_trapz=n_trapz)
+            pipeline_integral_val_np = np.array(pipeline_integral_val_jax) # Convert JAX array to NumPy for assertions
+            
+            reference_integral_val = get_reference_comoving_distance_integral(z_val, omega_m_test_jax)
+
+            assert np.isfinite(pipeline_integral_val_np), f"JAX integral not finite for z={z_val}, N_trapz={n_trapz}. Got: {pipeline_integral_val_np}"
+            if np.isfinite(reference_integral_val):
+                atol = 1e-8 if z_val < 0.001 else 1e-7 # Adjusted atol for JAX, can be fine-tuned
+                assert np.allclose(pipeline_integral_val_np, reference_integral_val, rtol=1e-5, atol=atol), \
+                    f"JAX integral mismatch z={z_val}, N_trapz={n_trapz}: P={pipeline_integral_val_np}, R={reference_integral_val}"
+
+    # Test z_val = 0.0 specifically (should be 0.0)
+    pipeline_integral_at_zero_jax = analyzer_instance_jax._scalar_comoving_distance_integral(0.0)
+    pipeline_integral_at_zero_np = np.array(pipeline_integral_at_zero_jax)
+    assert pipeline_integral_at_zero_np == 0.0, "JAX Integral at z=0.0 should be 0.0"
+
+    # Test N_trapz edge cases
+    small_N_trapz_values = [1, 2, 3]
+    test_z_for_small_N_jax = 0.1
+
+    for n_trapz_edge in small_N_trapz_values:
+        pipeline_val_edge_jax = analyzer_instance_jax._scalar_comoving_distance_integral(test_z_for_small_N_jax, N_trapz=n_trapz_edge)
+        pipeline_val_edge_np = np.array(pipeline_val_edge_jax)
+        reference_val_edge_N = get_reference_comoving_distance_integral(test_z_for_small_N_jax, omega_m_test_jax)
+        
+        assert np.isfinite(pipeline_val_edge_np), f"JAX integral not finite z={test_z_for_small_N_jax}, N_trapz={n_trapz_edge}. Got: {pipeline_val_edge_np}"
+        if n_trapz_edge == 1:
+            # jax.numpy.trapz also returns 0.0 for a single point, similar to numpy.trapz
+            assert pipeline_val_edge_np == 0.0, f"JAX N_trapz=1 should return 0.0. Got: {pipeline_val_edge_np}"
+        elif np.isfinite(reference_val_edge_N):
+            assert np.allclose(pipeline_val_edge_np, reference_val_edge_N, rtol=0.5), \
+                f"JAX integral mismatch z={test_z_for_small_N_jax}, N_trapz={n_trapz_edge}: P={pipeline_val_edge_np}, R={reference_val_edge_N}"
+
+# --- Test for _lum_dist_model_uncached (JAX Backend) --- 
+
+@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX not installed or not configured")
+def test_lum_dist_model_uncached_jax_stability_and_accuracy():
+    """
+    Tests _lum_dist_model_uncached with JAX backend for stability and accuracy.
+    """
+    if not JAX_AVAILABLE: # Redundant due to skipif, but good for clarity
+        pytest.skip("JAX not available")
+    
+    global jnp # jnp is defined in the module scope if JAX_AVAILABLE is True
+
+    fixed_omega_m_val = 0.3
+    fixed_c_val = DEFAULT_C_LIGHT
+    
+    # Dummy data for H0LogLikelihood (NumPy arrays are fine, converted internally by the class)
+    dummy_dL_gw_samples = np.array([100.0, 150.0])
+    dummy_host_galaxies_z = np.array([0.01, 0.02])
+    dummy_host_galaxies_mass_proxy = np.array([1.0, 1.0])
+    dummy_host_galaxies_z_err = np.array([0.001, 0.001])
+
+    analyzer_instance_jax = H0LogLikelihood(
+        xp=jnp, # Use jax.numpy
+        backend_name="jax",
+        dL_gw_samples=dummy_dL_gw_samples,
+        host_galaxies_z=dummy_host_galaxies_z,
+        host_galaxies_mass_proxy=dummy_host_galaxies_mass_proxy,
+        host_galaxies_z_err=dummy_host_galaxies_z_err,
+        omega_m_val=fixed_omega_m_val,
+        c_val=fixed_c_val,
+        h0_min=10, h0_max=200,
+        alpha_min=-1, alpha_max=1
+    )
+
+    # Test Scalar z input
+    z_scalar_inputs = [0.0, 1e-9, 0.001, 0.01, 0.1, 0.5, 1.0, 2.5]
+    H0_inputs = [10.0, 50.0, 70.0, 100.0, 150.0]
+
+    for z_val_scalar in z_scalar_inputs:
+        for h0_val_scalar in H0_inputs:
+            # Pass Python float for z_val_scalar, H0LogLikelihood handles conversion via self.xp
+            pipeline_lum_dist_jax = analyzer_instance_jax._lum_dist_model_uncached(z_val_scalar, h0_val_scalar)
+            pipeline_lum_dist_np = np.array(pipeline_lum_dist_jax) # Convert JAX array to NumPy
+            
+            reference_lum_dist = get_reference_luminosity_distance(z_val_scalar, h0_val_scalar, fixed_omega_m_val)
+            
+            assert np.isscalar(pipeline_lum_dist_np) or pipeline_lum_dist_np.ndim == 0, \
+                f"JAX Pipeline output not scalar for scalar z={z_val_scalar}, H0={h0_val_scalar}. Shape: {pipeline_lum_dist_np.shape}"
+            assert np.isfinite(pipeline_lum_dist_np), \
+                f"JAX Lum_dist not finite for z={z_val_scalar}, H0={h0_val_scalar}. Got {pipeline_lum_dist_np}"
+            if np.isfinite(reference_lum_dist):
+                assert np.allclose(pipeline_lum_dist_np, reference_lum_dist, rtol=1e-5, atol=1e-8), \
+                    f"JAX Lum_dist mismatch z={z_val_scalar}, H0={h0_val_scalar}: P={pipeline_lum_dist_np}, R={reference_lum_dist}"
+
+    # Test Array z input
+    z_array_input_np = np.array([0.0, 0.01, 0.1, 0.5, 1.0, 2.5])
+    # H0LogLikelihood with JAX backend will convert NumPy input to JAX array internally via self.xp.asarray
+    # So, passing z_array_input_np directly is fine.
+    H0_test_val_for_array = 70.0
+    
+    pipeline_lum_dist_jax_array = analyzer_instance_jax._lum_dist_model_uncached(z_array_input_np, H0_test_val_for_array)
+    pipeline_lum_dist_np_array = np.array(pipeline_lum_dist_jax_array) # Convert JAX array to NumPy
+
+    reference_lum_dist_array = get_reference_luminosity_distance(z_array_input_np, H0_test_val_for_array, fixed_omega_m_val)
+
+    assert pipeline_lum_dist_np_array.shape == reference_lum_dist_array.shape, "JAX Shape mismatch for array input"
+    assert np.all(np.isfinite(pipeline_lum_dist_np_array)), "JAX Array lum_dist contains non-finite values"
+    if np.all(np.isfinite(reference_lum_dist_array)):
+        assert np.allclose(pipeline_lum_dist_np_array, reference_lum_dist_array, rtol=1e-5, atol=1e-8), \
+            "JAX Array lum_dist mismatch with reference"
+
+    # Test Edge case for H0_val near zero
+    z_test_scalar_edge = 0.1 
+    H0_edge_cases = [1e-10, 0.0] 
+
+    for h0_edge in H0_edge_cases:
+        # Scalar z with edge H0 (pass z_test_scalar_edge as Python float)
+        pipeline_ld_edge_jax_scalar = analyzer_instance_jax._lum_dist_model_uncached(z_test_scalar_edge, h0_edge)
+        pipeline_ld_edge_np_scalar = np.array(pipeline_ld_edge_jax_scalar)
+        assert np.isinf(pipeline_ld_edge_np_scalar) and pipeline_ld_edge_np_scalar > 0, \
+            f"Expected positive inf for JAX scalar z and H0_edge={h0_edge}, got {pipeline_ld_edge_np_scalar}"
+        
+        # Array z with edge H0 (pass z_array_input_np as NumPy array)
+        pipeline_ld_edge_jax_array = analyzer_instance_jax._lum_dist_model_uncached(z_array_input_np, h0_edge)
+        pipeline_ld_edge_np_array = np.array(pipeline_ld_edge_jax_array)
+        assert np.all(np.isinf(pipeline_ld_edge_np_array)) and np.all(pipeline_ld_edge_np_array > 0), \
+            f"Expected all positive inf for JAX array z and H0_edge={h0_edge}, got {pipeline_ld_edge_np_array}"
+
+# --- Test for H0DistanceCache accuracy (JAX-backed source) --- 
+
+@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX not installed or not configured")
+def test_h0_distance_cache_accuracy_when_source_is_jax():
+    """
+    Tests H0DistanceCache accuracy when its source function (_lum_dist_model_uncached)
+    is operating with jax.numpy, via H0LogLikelihood.validate_distance_cache_accuracy.
+    """
+    if not JAX_AVAILABLE: # Defensive skip, though decorator should handle it
+        pytest.skip("JAX not available")
+
+    global jnp # jnp is defined in the module scope if JAX_AVAILABLE is True
+
+    fixed_omega_m_val = 0.3
+    fixed_c_val = DEFAULT_C_LIGHT
+    
+    # Minimal valid dummy data for H0LogLikelihood instantiation
+    # These are passed as NumPy arrays; H0LogLikelihood converts to self.xp (jnp here)
+    dummy_dL_gw_samples = np.array([100.0, 150.0])
+    dummy_host_galaxies_z = np.array([0.01, 0.02])
+    dummy_host_galaxies_mass_proxy = np.array([1.0, 1.0])
+    dummy_host_galaxies_z_err = np.array([0.001, 0.001])
+
+    analyzer_instance_jax = H0LogLikelihood(
+        xp=jnp, # Critical: use jax.numpy
+        backend_name="jax", # Critical: set backend name to jax
+        dL_gw_samples=dummy_dL_gw_samples,
+        host_galaxies_z=dummy_host_galaxies_z,
+        host_galaxies_mass_proxy=dummy_host_galaxies_mass_proxy,
+        host_galaxies_z_err=dummy_host_galaxies_z_err,
+        omega_m_val=fixed_omega_m_val,
+        c_val=fixed_c_val,
+        h0_min=10, h0_max=200,
+        alpha_min=-1, alpha_max=1
+        # The H0LogLikelihood constructor creates and configures the _distance_cache.
+        # It sets self._lum_dist_model_uncached as the cache's compute function.
+        # Since self.xp is jnp, _lum_dist_model_uncached will operate using jnp.
+    )
+
+    # Test cache accuracy
+    # validate_distance_cache_accuracy will call the JAX-backed _lum_dist_model_uncached
+    # to build interpolators. The H0DistanceCache itself handles converting JAX arrays
+    # to NumPy arrays before feeding them to scipy's interp1d.
+    max_err = 1e-5
+    validation_passed = analyzer_instance_jax.validate_distance_cache_accuracy(max_relative_error=max_err)
+    
+    assert validation_passed is True, \
+        f"Distance cache accuracy validation failed for JAX-backed source function with max_relative_error={max_err}."
+
+    # Optional: Log Cache Statistics for review
+    print("Cache Stats for test_h0_distance_cache_accuracy_when_source_is_jax:")
+    analyzer_instance_jax.log_distance_cache_stats()
+    
+    # Clean up for subsequent tests if any
+    analyzer_instance_jax.clear_distance_cache() 

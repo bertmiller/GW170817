@@ -227,3 +227,122 @@ if __name__ == "__main__":
         pytest.main([__file__, "-v"])
     else:
         print("❌ JAX not available - skipping consistency tests") 
+
+# --- New Test for Full Likelihood Consistency (Stable Core) --- 
+
+@pytest.mark.skipif(not jax_available, reason="JAX not available")
+def test_full_likelihood_numpy_vs_jax_stable_core():
+    """
+    Tests the full H0LogLikelihood.__call__ method for numerical consistency
+    between NumPy and JAX backends, focusing on paths that use the already
+    stabilized core distance functions and bypassing complex marginalization initially.
+    """
+    if not jax_available: # Should be caught by skipif, but defensive
+        pytest.skip("JAX not available")
+
+    # Ensure JAX 64-bit precision (might be set globally, but good to be explicit for the test focus)
+    # Note: jax is already imported if jax_available is True
+    jax.config.update("jax_enable_x64", True)
+    import jax.numpy as jnp # jnp will be available if jax is
+
+    from gwsiren.h0_mcmc_analyzer import (
+        H0LogLikelihood, # Using direct class instantiation
+        DEFAULT_SIGMA_V_PEC, DEFAULT_C_LIGHT, DEFAULT_OMEGA_M,
+        DEFAULT_H0_PRIOR_MIN, DEFAULT_H0_PRIOR_MAX,
+        DEFAULT_ALPHA_PRIOR_MIN, DEFAULT_ALPHA_PRIOR_MAX,
+        DEFAULT_Z_ERR_THRESHOLD, DEFAULT_QUAD_POINTS,
+        DEFAULT_Z_MARGINALIZATION_SIGMA_RANGE,
+        DEFAULT_MCMC_BATCH_SIZE
+    )
+    # from .utils.mock_data import mock_event # Already imported at module level
+
+    # Scenario 1: Minimal marginalization (z_err below threshold)
+    print("\n🧪 Testing Scenario 1: Minimal Redshift Marginalization")
+    pkg_scenario1 = mock_event(n_galaxies=2, n_samples=10, seed=42)
+    pkg_scenario1.candidate_galaxies_df['z_err'] = 1e-8 # Ensure z_err is very small
+
+    common_params_s1 = {
+        "dL_gw_samples": pkg_scenario1.dl_samples,
+        "host_galaxies_z": pkg_scenario1.candidate_galaxies_df["z"].values,
+        "host_galaxies_mass_proxy": pkg_scenario1.candidate_galaxies_df["mass_proxy"].values,
+        "host_galaxies_z_err": pkg_scenario1.candidate_galaxies_df["z_err"].values,
+        "sigma_v": DEFAULT_SIGMA_V_PEC,
+        "c_val": DEFAULT_C_LIGHT,
+        "omega_m_val": DEFAULT_OMEGA_M,
+        "h0_min": DEFAULT_H0_PRIOR_MIN, "h0_max": DEFAULT_H0_PRIOR_MAX,
+        "alpha_min": DEFAULT_ALPHA_PRIOR_MIN, "alpha_max": DEFAULT_ALPHA_PRIOR_MAX,
+        "z_err_threshold": DEFAULT_Z_ERR_THRESHOLD,
+        "n_quad_points": DEFAULT_QUAD_POINTS, 
+        "z_sigma_range": DEFAULT_Z_MARGINALIZATION_SIGMA_RANGE,
+        "use_vectorized_likelihood": False, # Force non-vectorized path (looped/batched)
+        "batch_size": DEFAULT_MCMC_BATCH_SIZE # Relevant for the batched path when use_vectorized_likelihood=False
+    }
+
+    ll_numpy_s1 = H0LogLikelihood(xp=np, backend_name="numpy", **common_params_s1)
+    ll_jax_s1 = H0LogLikelihood(xp=jnp, backend_name="jax", **common_params_s1)
+
+    thetas_to_test = [
+        [70.0, 0.0], 
+        [65.0, 0.1], 
+        [75.0, -0.1],
+        [DEFAULT_H0_PRIOR_MIN + 1.0, DEFAULT_ALPHA_PRIOR_MIN + 0.05],
+        [DEFAULT_H0_PRIOR_MAX - 1.0, DEFAULT_ALPHA_PRIOR_MAX - 0.05]
+    ]
+    theta_out_of_bounds_h0 = [DEFAULT_H0_PRIOR_MIN - 5.0, 0.0]
+    theta_out_of_bounds_alpha = [70.0, DEFAULT_ALPHA_PRIOR_MAX + 0.1]
+    all_thetas_s1 = thetas_to_test + [theta_out_of_bounds_h0, theta_out_of_bounds_alpha]
+
+    for theta in all_thetas_s1:
+        print(f"  Testing theta: {theta}")
+        val_numpy = ll_numpy_s1(theta)
+        val_jax_raw = ll_jax_s1(theta)
+        val_jax_numpy = np.array(val_jax_raw) 
+
+        is_theta_valid = (DEFAULT_H0_PRIOR_MIN <= theta[0] <= DEFAULT_H0_PRIOR_MAX and
+                          DEFAULT_ALPHA_PRIOR_MIN <= theta[1] <= DEFAULT_ALPHA_PRIOR_MAX)
+
+        if is_theta_valid:
+            assert np.isfinite(val_numpy), f"S1 NumPy likelihood not finite for valid theta={theta}, got {val_numpy}"
+            assert np.isfinite(val_jax_numpy), f"S1 JAX likelihood not finite for valid theta={theta}, got {val_jax_numpy}"
+            assert np.allclose(val_numpy, val_jax_numpy, rtol=1e-5, atol=1e-8), \
+                f"S1 Likelihood mismatch for theta={theta}: numpy={val_numpy}, jax={val_jax_numpy}"
+        else: 
+            assert val_numpy == -np.inf, f"S1 NumPy likelihood not -inf for out-of-bounds theta={theta}, got {val_numpy}"
+            assert val_jax_numpy == -jnp.inf, f"S1 JAX likelihood not -inf for out-of-bounds theta={theta}, got {val_jax_numpy}"
+    print("✅ Scenario 1 (Minimal Marginalization) Passed!")
+
+    # Scenario 2: With Redshift Marginalization
+    print("\n🧪 Testing Scenario 2: With Redshift Marginalization")
+    pkg_scenario2 = mock_event(n_galaxies=2, n_samples=10, seed=43)
+    # Ensure z_err triggers marginalization
+    pkg_scenario2.candidate_galaxies_df['z_err'] = np.array([0.001, 0.005]) 
+
+    common_params_s2 = common_params_s1.copy()
+    common_params_s2.update({
+        "dL_gw_samples": pkg_scenario2.dl_samples,
+        "host_galaxies_z": pkg_scenario2.candidate_galaxies_df["z"].values,
+        "host_galaxies_mass_proxy": pkg_scenario2.candidate_galaxies_df["mass_proxy"].values,
+        "host_galaxies_z_err": pkg_scenario2.candidate_galaxies_df["z_err"].values,
+        "n_quad_points": 5 # Using fewer quad points for test speed, as in other consistency tests
+    })
+
+    ll_numpy_s2 = H0LogLikelihood(xp=np, backend_name="numpy", **common_params_s2)
+    ll_jax_s2 = H0LogLikelihood(xp=jnp, backend_name="jax", **common_params_s2)
+    
+    # Can reuse thetas_to_test, or define new ones if specific H0 values are more insightful for marginalization
+    all_thetas_s2 = thetas_to_test # For now, use the same valid thetas
+
+    for theta in all_thetas_s2:
+        print(f"  Testing theta: {theta}")
+        val_numpy = ll_numpy_s2(theta)
+        val_jax_raw = ll_jax_s2(theta)
+        val_jax_numpy = np.array(val_jax_raw)
+
+        # All these thetas are valid for Scenario 2 check
+        assert np.isfinite(val_numpy), f"S2 NumPy likelihood not finite for valid theta={theta}, got {val_numpy}"
+        assert np.isfinite(val_jax_numpy), f"S2 JAX likelihood not finite for valid theta={theta}, got {val_jax_numpy}"
+        # Tolerance might need to be slightly looser when marginalization is involved due to potential small differences
+        # in quadrature or float precision accumulation, but start with the same.
+        assert np.allclose(val_numpy, val_jax_numpy, rtol=1e-5, atol=1e-7), \
+            f"S2 Likelihood mismatch for theta={theta}: numpy={val_numpy}, jax={val_jax_numpy}"
+    print("✅ Scenario 2 (With Marginalization, n_quad_points=5) Passed!") 
