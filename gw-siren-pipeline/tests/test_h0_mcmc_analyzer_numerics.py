@@ -260,4 +260,76 @@ def test_lum_dist_model_uncached_numpy_stability_and_accuracy():
         # Array z with edge H0
         pipeline_ld_edge_array = analyzer_instance._lum_dist_model_uncached(z_array_input, h0_edge)
         assert np.all(np.isinf(pipeline_ld_edge_array)), \
-            f"Expected all inf for array z and H0_edge={h0_edge}, got {pipeline_ld_edge_array}" 
+            f"Expected all inf for array z and H0_edge={h0_edge}, got {pipeline_ld_edge_array}"
+
+# --- Test for H0DistanceCache accuracy --- 
+
+def test_h0_distance_cache_accuracy_numpy():
+    """
+    Tests the H0DistanceCache accuracy via H0LogLikelihood.validate_distance_cache_accuracy.
+    Also tests basic hit/miss logic.
+    """
+    fixed_omega_m_val = 0.3
+    fixed_c_val = DEFAULT_C_LIGHT
+    
+    # Minimal valid dummy data for H0LogLikelihood instantiation
+    dummy_dL_gw_samples = np.array([100.0, 150.0])
+    dummy_host_galaxies_z = np.array([0.01, 0.02])
+    dummy_host_galaxies_mass_proxy = np.array([1.0, 1.0])
+    dummy_host_galaxies_z_err = np.array([0.001, 0.001])
+
+    analyzer_instance = H0LogLikelihood(
+        xp=np,
+        backend_name="numpy",
+        dL_gw_samples=dummy_dL_gw_samples,
+        host_galaxies_z=dummy_host_galaxies_z,
+        host_galaxies_mass_proxy=dummy_host_galaxies_mass_proxy,
+        host_galaxies_z_err=dummy_host_galaxies_z_err,
+        omega_m_val=fixed_omega_m_val,
+        c_val=fixed_c_val,
+        h0_min=10, h0_max=200,
+        alpha_min=-1, alpha_max=1
+    )
+
+    # Test cache accuracy
+    # The validate_distance_cache_accuracy method uses predefined test_z and test_h0 values.
+    # Default test H0 values for validate_distance_cache_accuracy are [50.0, 65.0, 70.0, 75.0, 90.0, 120.0]
+    assert analyzer_instance.validate_distance_cache_accuracy(max_relative_error=1e-5) is True, \
+        "Cache validation failed for max_relative_error=1e-5"
+
+    # Test Cache Hit/Miss Logic (Optional but Recommended)
+    # validate_distance_cache_accuracy would have populated the cache.
+    
+    stats_before_calls = analyzer_instance.get_distance_cache_stats()
+    # These print statements help in debugging if assertions fail.
+    # print(f"Stats before calls: {stats_before_calls}")
+
+    # Test cache hit: Use an H0 value that should have been cached.
+    # 70.0 is one of the default H0 values used by validate_distance_cache_accuracy.
+    # The z_values [0.1, 0.5] are also within the default test_z_values range [0.01, ..., 2.0].
+    test_z_for_hit_miss = np.array([0.1, 0.5])
+    _ = analyzer_instance._lum_dist_model(z_values=test_z_for_hit_miss, H0_val=70.0)
+    stats_after_hit = analyzer_instance.get_distance_cache_stats()
+    # print(f"Stats after hit: {stats_after_hit}")
+    assert stats_after_hit['cache_hits'] > stats_before_calls['cache_hits'], \
+        f"Cache hit count did not increase. Before: {stats_before_calls['cache_hits']}, After: {stats_after_hit['cache_hits']}"
+
+    # Test cache miss: Use a new H0 value not in the default test set for validate_distance_cache_accuracy,
+    # and also different from the H0 tolerance used by the cache (default 0.01).
+    # Make sure it's different enough from 70.0 to not fall into the same H0 bin if tolerance is used.
+    _ = analyzer_instance._lum_dist_model(z_values=test_z_for_hit_miss, H0_val=71.23) 
+    stats_after_miss = analyzer_instance.get_distance_cache_stats()
+    # print(f"Stats after miss: {stats_after_miss}")
+    # A miss can trigger a build, which might also be counted.
+    # The key is that a new H0 value should not simply be a hit.
+    # We expect either cache_misses to increase or num_interpolators_built to increase.
+    assert (stats_after_miss['cache_misses'] > stats_after_hit['cache_misses'] or 
+            stats_after_miss['num_interpolators_built'] > stats_after_hit['num_interpolators_built']), \
+        f"Neither cache miss nor interpolator build count increased. AfterHit: {stats_after_hit}, AfterMiss: {stats_after_miss}"
+
+    # Log stats for review
+    print("Final Cache Stats for test_h0_distance_cache_accuracy_numpy:")
+    analyzer_instance.log_distance_cache_stats()
+    
+    # Clean up for subsequent tests if any
+    analyzer_instance.clear_distance_cache() 
