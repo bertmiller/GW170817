@@ -796,3 +796,194 @@ def test_jitted_core_static_marginalize_one_galaxy_accuracy():
             f"JITted JAX: {pipeline_logL_np_from_jitted}, NumPy: {reference_logL}, Diff: {pipeline_logL_np_from_jitted - reference_logL}"
 
 # <<< END OF NEW TEST FUNCTION FOR JITTED VERSION >>> 
+
+# <<< START OF NEW TEST FUNCTION FOR VMAPPED JITTED VERSION >>>
+@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX not installed or not configured")
+def test_vmapped_jit_marginalize_galaxies_batch_accuracy():
+    """
+    Tests the vmap'ped and JITted _vmapped_jit_marginalize_galaxies function
+    for numerical accuracy over a batch of galaxies against a looped NumPy reference.
+    """
+    if not JAX_AVAILABLE:
+        pytest.skip("JAX not available")
+
+    global jnp
+    from gwsiren import h0_mcmc_analyzer
+    from gwsiren.h0_mcmc_analyzer import (
+        _vmapped_jit_marginalize_galaxies,
+        _jitted_static_lum_dist,
+        _jitted_static_comoving_integral,
+        DEFAULT_C_LIGHT,
+        DEFAULT_OMEGA_M,
+        DEFAULT_SIGMA_V_PEC
+    )
+
+    # Test Parameters
+    H0_test = 70.0
+    mu_z_batch_np = np.array([0.05, 0.06, 0.07, 0.02], dtype=np.float64)
+    sigma_z_batch_np = np.array([0.005, 0.006, 0.004, 0.001], dtype=np.float64)
+    np.random.seed(42) # Consistent random samples
+    dL_gw_samples_np = np.random.normal(loc=220, scale=20, size=100).astype(np.float64)
+    
+    c_val_test = DEFAULT_C_LIGHT
+    sigma_v_val_test = DEFAULT_SIGMA_V_PEC
+    omega_m_val_test = DEFAULT_OMEGA_M
+    n_quad_points_test = h0_mcmc_analyzer.DEFAULT_QUAD_POINTS # Used for numpy_analyzer setup
+    z_sigma_range_test = h0_mcmc_analyzer.DEFAULT_Z_MARGINALIZATION_SIGMA_RANGE
+    N_trapz_lum_dist_test = 200
+
+    # --- Setup NumPy based H0LogLikelihood for reference calculation ---
+    # This analyzer will be used to call its single-galaxy looped marginalization.
+    # The dL_gw_samples and other parameters should match those used for the JAX path.
+    analyzer_numpy = H0LogLikelihood(
+        xp=np,
+        backend_name="numpy",
+        dL_gw_samples=dL_gw_samples_np,
+        # Dummy host galaxies z, mass_proxy, z_err for instantiation, not directly used for batch ref.
+        host_galaxies_z=mu_z_batch_np, # Can use the batch data here
+        host_galaxies_mass_proxy=np.ones_like(mu_z_batch_np),
+        host_galaxies_z_err=sigma_z_batch_np, # Can use the batch data here
+        c_val=c_val_test,
+        sigma_v=sigma_v_val_test,
+        omega_m_val=omega_m_val_test,
+        n_quad_points=n_quad_points_test,
+        z_sigma_range=z_sigma_range_test
+    )
+
+    # --- Reference Value Calculation (Looping NumPy single-galaxy marginalization) ---
+    reference_logLs_np = np.array([
+        analyzer_numpy._marginalize_single_galaxy_redshift_looped(
+            mu_z_batch_np[i], sigma_z_batch_np[i], H0_test
+        ) for i in range(len(mu_z_batch_np))
+    ])
+    print(f"Reference NumPy LogLs (batch loop): {reference_logLs_np}")
+
+    # --- Prepare JAX inputs ---
+    # Broadcasted arguments (scalars or fixed arrays for the batch)
+    H0_jnp = jnp.array(H0_test, dtype=jnp.float64)
+    dL_gw_samples_jnp = jnp.array(dL_gw_samples_np, dtype=jnp.float64)
+    quad_nodes_np = analyzer_numpy._quad_nodes # Get from numpy instance
+    quad_weights_np = analyzer_numpy._quad_weights # Get from numpy instance
+    quad_nodes_jnp = jnp.array(quad_nodes_np, dtype=jnp.float64)
+    quad_weights_jnp = jnp.array(quad_weights_np, dtype=jnp.float64)
+    
+    # Mapped arguments (arrays to be iterated over by vmap)
+    mu_z_batch_jnp = jnp.array(mu_z_batch_np, dtype=jnp.float64)
+    sigma_z_batch_jnp = jnp.array(sigma_z_batch_np, dtype=jnp.float64)
+
+    # --- Execute vmap'ped JAX function ---
+    # Arguments for _vmapped_jit_marginalize_galaxies, in order defined by in_axes:
+    # (xp_module, H0_val_jnp, mu_z_batch_jnp, sigma_z_batch_jnp, 
+    #  dL_gw_samples_jnp, _quad_nodes_jnp, _quad_weights_jnp, 
+    #  c_val, sigma_v_val, omega_m_val, 
+    #  _jitted_lum_dist_calculator_func, _jitted_comoving_integral_func, 
+    #  z_sigma_range, N_trapz_lum_dist)
+
+    pipeline_logLs_vmapped_jax = _vmapped_jit_marginalize_galaxies(
+        jnp,                         # xp_module
+        H0_jnp,                      # H0_val_jnp
+        mu_z_batch_jnp,              # mu_z_batch_jnp (mapped)
+        sigma_z_batch_jnp,           # sigma_z_batch_jnp (mapped)
+        dL_gw_samples_jnp,           # dL_gw_samples_jnp
+        quad_nodes_jnp,              # _quad_nodes_jnp
+        quad_weights_jnp,            # _quad_weights_jnp
+        c_val_test,                  # c_val
+        sigma_v_val_test,            # sigma_v_val
+        omega_m_val_test,            # omega_m_val
+        _jitted_static_lum_dist,     # _jitted_lum_dist_calculator_func
+        _jitted_static_comoving_integral, # _jitted_comoving_integral_func
+        z_sigma_range_test,          # z_sigma_range
+        N_trapz_lum_dist_test        # N_trapz_lum_dist
+    )
+    pipeline_logLs_np_from_vmapped = np.array(pipeline_logLs_vmapped_jax)
+    print(f"Pipeline vmap'ped JAX LogLs (converted to np): {pipeline_logLs_np_from_vmapped}")
+
+    # --- Assertions ---
+    assert pipeline_logLs_np_from_vmapped.shape == reference_logLs_np.shape, \
+        f"Shape mismatch: JAX vmapped output shape {pipeline_logLs_np_from_vmapped.shape}, Reference NumPy shape {reference_logLs_np.shape}"
+    assert np.all(np.isfinite(pipeline_logLs_np_from_vmapped)), \
+        f"Pipeline vmap'ped JAX LogLs not all finite: {pipeline_logLs_np_from_vmapped}"
+    assert np.all(np.isfinite(reference_logLs_np)), \
+        f"Reference NumPy LogLs not all finite: {reference_logLs_np}"
+
+    # Element-wise comparison, accounting for potential -inf values
+    for i in range(len(reference_logLs_np)):
+        ref_val = reference_logLs_np[i]
+        jax_val = pipeline_logLs_np_from_vmapped[i]
+        if np.isneginf(ref_val) and np.isneginf(jax_val):
+            continue # Both are -inf, considered close
+        assert np.allclose(jax_val, ref_val, rtol=1e-5, atol=1e-8), \
+            f"Mismatch at index {i}: JAX vmapped={jax_val}, NumPy ref={ref_val}, Diff={jax_val - ref_val}"
+
+# <<< END OF NEW TEST FUNCTION FOR VMAPPED JITTED VERSION >>> 
+
+# <<< START OF NEW TEST FUNCTION FOR _marginalize_batch_galaxy_redshift (JAX PATH INTEGRATION) >>>
+@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX not installed or not configured")
+def test_marginalize_batch_galaxy_redshift_jax_path_accuracy():
+    """
+    Tests H0LogLikelihood._marginalize_batch_galaxy_redshift with JAX backend 
+    to ensure correct integration of _vmapped_jit_marginalize_galaxies.
+    Compares against the NumPy path of the same method.
+    """
+    if not JAX_AVAILABLE:
+        pytest.skip("JAX not available")
+
+    global jnp
+    from gwsiren import h0_mcmc_analyzer # For default constants
+    # No need to directly import the _vmapped function here, test is via class method
+
+    # Test Parameters
+    H0_test = 70.0
+    mu_z_batch_np = np.array([0.05, 0.06, 0.07, 0.02, 0.15], dtype=np.float64)
+    sigma_z_batch_np = np.array([0.005, 0.006, 0.004, 0.001, 0.015], dtype=np.float64)
+    np.random.seed(42) # Consistent random samples
+    dL_gw_samples_np = np.random.normal(loc=220, scale=20, size=100).astype(np.float64)
+    
+    # Parameters for H0LogLikelihood instantiation
+    common_params = {
+        "dL_gw_samples": dL_gw_samples_np,
+        "host_galaxies_z": mu_z_batch_np, # Use batch data for instantiation
+        "host_galaxies_mass_proxy": np.ones_like(mu_z_batch_np),
+        "host_galaxies_z_err": sigma_z_batch_np,
+        "c_val": h0_mcmc_analyzer.DEFAULT_C_LIGHT,
+        "sigma_v": h0_mcmc_analyzer.DEFAULT_SIGMA_V_PEC,
+        "omega_m_val": h0_mcmc_analyzer.DEFAULT_OMEGA_M,
+        "n_quad_points": h0_mcmc_analyzer.DEFAULT_QUAD_POINTS,
+        "z_sigma_range": h0_mcmc_analyzer.DEFAULT_Z_MARGINALIZATION_SIGMA_RANGE
+    }
+
+    # --- JAX Path Execution ---
+    analyzer_jax = H0LogLikelihood(xp=jnp, backend_name="jax", **common_params)
+    # Call the method under test
+    jax_results_jax_array = analyzer_jax._marginalize_batch_galaxy_redshift(
+        H0_test, mu_z_batch_np, sigma_z_batch_np # Pass NumPy arrays, method should convert
+    )
+    jax_results_np = np.array(jax_results_jax_array)
+    print(f"JAX Path _marginalize_batch_galaxy_redshift results: {jax_results_np}")
+
+    # --- NumPy Path Reference Calculation ---
+    analyzer_numpy = H0LogLikelihood(xp=np, backend_name="numpy", **common_params)
+    # Call the same method, but it will use the NumPy internal path
+    numpy_reference_results_np = analyzer_numpy._marginalize_batch_galaxy_redshift(
+        H0_test, mu_z_batch_np, sigma_z_batch_np
+    )
+    print(f"NumPy Path _marginalize_batch_galaxy_redshift results: {numpy_reference_results_np}")
+
+    # --- Assertions ---
+    assert jax_results_np.shape == numpy_reference_results_np.shape, \
+        f"Shape mismatch: JAX path shape {jax_results_np.shape}, NumPy path shape {numpy_reference_results_np.shape}"
+    assert np.all(np.isfinite(jax_results_np)), \
+        f"JAX path results not all finite: {jax_results_np}"
+    assert np.all(np.isfinite(numpy_reference_results_np)), \
+        f"NumPy path reference results not all finite: {numpy_reference_results_np}"
+
+    # Element-wise comparison
+    for i in range(len(numpy_reference_results_np)):
+        ref_val = numpy_reference_results_np[i]
+        jax_val = jax_results_np[i]
+        if np.isneginf(ref_val) and np.isneginf(jax_val):
+            continue
+        assert np.allclose(jax_val, ref_val, rtol=1e-5, atol=1e-8), \
+            f"Mismatch for method _marginalize_batch_galaxy_redshift at index {i}: JAX path={jax_val}, NumPy path={ref_val}, Diff={jax_val - ref_val}"
+
+# <<< END OF NEW TEST FUNCTION FOR _marginalize_batch_galaxy_redshift (JAX PATH INTEGRATION) >>> 
