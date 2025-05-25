@@ -675,3 +675,124 @@ def test_core_static_marginalize_one_galaxy_jax_accuracy():
             f"JAX: {pipeline_logL_np}, NumPy: {reference_logL}, Diff: {pipeline_logL_np - reference_logL}"
 
 # <<< END OF NEW TEST FUNCTION >>> 
+
+# <<< START OF NEW TEST FUNCTION FOR JITTED VERSION >>>
+@pytest.mark.skipif(not JAX_AVAILABLE, reason="JAX not installed or not configured")
+def test_jitted_core_static_marginalize_one_galaxy_accuracy():
+    """
+    Tests the JIT-compiled _jitted_core_static_marginalize_one_galaxy function 
+    for numerical accuracy against the NumPy-based looped marginalization.
+    """
+    if not JAX_AVAILABLE:
+        pytest.skip("JAX not available")
+
+    global jnp # Ensure jnp is accessible
+    from gwsiren import h0_mcmc_analyzer # To access module-level jitted functions
+    # Import the JITted version of the core function
+    from gwsiren.h0_mcmc_analyzer import (
+        _jitted_core_static_marginalize_one_galaxy, 
+        DEFAULT_C_LIGHT, 
+        DEFAULT_OMEGA_M, 
+        DEFAULT_SIGMA_V_PEC,
+        _jitted_static_lum_dist, # JITted lum_dist function
+        _jitted_static_comoving_integral # JITted comoving integral function
+    )
+
+    # Test Parameters (same as the non-JITted test for direct comparison)
+    H0_test = 70.0
+    mu_z_test = 0.05
+    sigma_z_test = 0.005
+    np.random.seed(42) # Consistent random samples
+    dL_gw_samples_np = np.random.normal(loc=220, scale=20, size=100).astype(np.float64)
+    
+    c_val_test = DEFAULT_C_LIGHT
+    sigma_v_val_test = DEFAULT_SIGMA_V_PEC 
+    omega_m_val_test = DEFAULT_OMEGA_M
+    n_quad_points_test = h0_mcmc_analyzer.DEFAULT_QUAD_POINTS 
+    z_sigma_range_test = h0_mcmc_analyzer.DEFAULT_Z_MARGINALIZATION_SIGMA_RANGE
+    N_trapz_lum_dist_test = 200
+
+    # --- Setup NumPy based H0LogLikelihood for reference calculation ---
+    dummy_host_galaxies_z = np.array([mu_z_test, 0.1])
+    dummy_host_galaxies_mass_proxy = np.array([1.0, 1.0])
+    dummy_host_galaxies_z_err = np.array([sigma_z_test, 0.01])
+
+    analyzer_numpy = H0LogLikelihood(
+        xp=np,
+        backend_name="numpy",
+        dL_gw_samples=dL_gw_samples_np,
+        host_galaxies_z=dummy_host_galaxies_z,
+        host_galaxies_mass_proxy=dummy_host_galaxies_mass_proxy,
+        host_galaxies_z_err=dummy_host_galaxies_z_err,
+        c_val=c_val_test,
+        sigma_v=sigma_v_val_test,
+        omega_m_val=omega_m_val_test,
+        n_quad_points=n_quad_points_test,
+        z_sigma_range=z_sigma_range_test
+    )
+    reference_logL = analyzer_numpy._marginalize_single_galaxy_redshift_looped(mu_z_test, sigma_z_test, H0_test)
+    print(f"Reference NumPy LogL (for JIT test): {reference_logL}")
+
+    # --- Prepare JAX inputs ---
+    H0_jnp = jnp.array(H0_test, dtype=jnp.float64)
+    mu_z_jnp = jnp.array(mu_z_test, dtype=jnp.float64)
+    sigma_z_jnp = jnp.array(sigma_z_test, dtype=jnp.float64)
+    dL_gw_samples_jnp = jnp.array(dL_gw_samples_np, dtype=jnp.float64)
+    quad_nodes_np = analyzer_numpy._quad_nodes
+    quad_weights_np = analyzer_numpy._quad_weights
+    quad_nodes_jnp = jnp.array(quad_nodes_np, dtype=jnp.float64)
+    quad_weights_jnp = jnp.array(quad_weights_np, dtype=jnp.float64)
+
+    # --- Execute JIT-compiled JAX static function ---
+    # Prepare arguments for the JITted function
+    # Dynamic args: H0_val_jnp, mu_z_scalar_jnp, sigma_z_scalar_jnp
+    # Static args: xp_module, dL_gw_samples_jnp, _quad_nodes_jnp, _quad_weights_jnp, c_val, sigma_v_val, omega_m_val, 
+    #              _jitted_lum_dist_calculator_func, _jitted_comoving_integral_func, z_sigma_range, N_trapz_lum_dist
+
+    # Warm-up call for JIT compilation (optional, but good practice for timing or ensuring compilation happens before main call)
+    _ = _jitted_core_static_marginalize_one_galaxy(
+        jnp, H0_jnp, mu_z_jnp, sigma_z_jnp, # Dynamic args first
+        # Static args follow, matching the order expected by the JITted function based on static_argnames
+        # The JITted function itself will receive all args, and JAX handles which are static vs dynamic.
+        # When calling, we pass all arguments normally.
+        dL_gw_samples_jnp, 
+        quad_nodes_jnp, 
+        quad_weights_jnp, 
+        c_val_test, 
+        sigma_v_val_test, 
+        omega_m_val_test,
+        _jitted_static_lum_dist, # Pass the actual JITted lum_dist function
+        _jitted_static_comoving_integral, # Pass the actual JITted comoving integral function
+        z_sigma_range_test, 
+        N_trapz_lum_dist_test
+    ).block_until_ready() # Ensure compilation finishes
+
+    # Actual call for testing
+    pipeline_logL_jitted_jax = _jitted_core_static_marginalize_one_galaxy(
+        jnp, H0_jnp, mu_z_jnp, sigma_z_jnp, 
+        dL_gw_samples_jnp, 
+        quad_nodes_jnp, 
+        quad_weights_jnp, 
+        c_val_test, 
+        sigma_v_val_test, 
+        omega_m_val_test,
+        _jitted_static_lum_dist, 
+        _jitted_static_comoving_integral,
+        z_sigma_range_test, 
+        N_trapz_lum_dist_test
+    )
+    pipeline_logL_np_from_jitted = np.array(pipeline_logL_jitted_jax)
+    print(f"Pipeline JITted JAX LogL (converted to np): {pipeline_logL_np_from_jitted}")
+
+    # --- Assertions ---
+    assert np.isfinite(pipeline_logL_np_from_jitted), f"Pipeline JITted JAX logL is not finite: {pipeline_logL_np_from_jitted}"
+    assert np.isfinite(reference_logL), f"Reference NumPy logL (for JIT test) is not finite: {reference_logL}"
+    
+    if np.isneginf(reference_logL) and np.isneginf(pipeline_logL_np_from_jitted):
+        pass
+    else:
+        assert np.allclose(pipeline_logL_np_from_jitted, reference_logL, rtol=1e-5, atol=1e-8), \
+            f"Mismatch between JITted JAX pipeline LogL and NumPy reference LogL.\n" \
+            f"JITted JAX: {pipeline_logL_np_from_jitted}, NumPy: {reference_logL}, Diff: {pipeline_logL_np_from_jitted - reference_logL}"
+
+# <<< END OF NEW TEST FUNCTION FOR JITTED VERSION >>> 

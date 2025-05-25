@@ -207,6 +207,21 @@ def _core_static_marginalize_one_galaxy_jax(
     
     return marginalized_log_L
 
+# JIT-compiled version of the core static marginalization function
+_jitted_core_static_marginalize_one_galaxy = jax.jit(
+    _core_static_marginalize_one_galaxy_jax,
+    static_argnames=(
+        'xp_module', 
+        'c_val', 
+        'sigma_v_val', 
+        'omega_m_val',
+        '_jitted_lum_dist_calculator_func',
+        '_jitted_comoving_integral_func',
+        'z_sigma_range',
+        'N_trapz_lum_dist'
+    )
+)
+
 class H0LogLikelihood:
     """Log-likelihood for joint inference of ``H0`` and ``alpha``.
 
