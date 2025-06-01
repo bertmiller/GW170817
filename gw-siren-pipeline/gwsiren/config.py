@@ -14,7 +14,7 @@ except Exception:  # pragma: no cover - fallback if PyYAML missing
 @dataclass(frozen=True)
 class ComputationConfig:
     """Configuration for computation settings."""
-    backend: str = "auto"  # Options: "auto", "numpy", "jax"
+    backend: str = "auto"  # Options: "auto", "numpy", "jax-cpu", "jax-metal". Legacy "jax" is also handled.
 
 
 @dataclass(frozen=True)

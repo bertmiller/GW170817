@@ -95,145 +95,176 @@ def get_xp(requested_backend="auto"):
 
     xp = None
     backend_name = None
-    device_name = "cpu"  # Default device
+    device_name = "cpu"  # Default device name, updated upon successful JAX init
 
     # --- JAX Attempt ---
     if requested_backend in ["auto", "jax"]:
+        jax_module = None
+        jnp_module = None
         try:
             jax_module = importlib.import_module("jax")
             jnp_module = importlib.import_module("jax.numpy")
             logger.info("JAX found.")
 
-            # Check if JAX_PLATFORM_NAME is set to cpu first
+            # Helper to test JAX configuration
+            def _test_jax_config(current_jnp, current_jax_module, config_name_log, enable_x64=None):
+                if enable_x64 is not None:
+                    current_jax_module.config.update("jax_enable_x64", enable_x64)
+                
+                # Determine dtype for test based on x64 config
+                # If x64 is explicitly False, or if it's None (not changing config) and current config is float32 default
+                is_float32_mode = (enable_x64 is False) or \
+                                  (enable_x64 is None and not current_jax_module.config.jax_enable_x64)
+
+                dtype_to_test = current_jnp.float32 if is_float32_mode else current_jnp.float64
+                test_arr = current_jnp.array([1.0, 2.0, 3.0], dtype=dtype_to_test)
+                res = current_jnp.sum(test_arr)
+                if not current_jnp.isfinite(res):
+                    raise RuntimeError(f"Basic JAX computation failed for {config_name_log}.")
+                precision_log = "float32" if is_float32_mode else "x64 (float64)"
+                logger.info(f"JAX {config_name_log} configured with {precision_log} and basic test passed.")
+
+            # 1. JAX_PLATFORM_NAME="cpu" (Highest priority if set)
             if os.environ.get("JAX_PLATFORM_NAME") == "cpu":
-                # Force CPU usage, skip GPU detection
-                # Configure JAX for double precision (float64) - CPU should support this
-                jax_module.config.update("jax_enable_x64", True)
-                logger.info("JAX double precision (x64) enabled.")
-                xp = jnp_module
-                backend_name = "jax"
-                device_name = "cpu"
-                logger.info("JAX using CPU (forced by JAX_PLATFORM_NAME).")
-            elif _is_nvidia_cuda_available():
-                # NVIDIA GPU with CUDA
-                jax_module.config.update("jax_enable_x64", True)
-                logger.info("JAX double precision (x64) enabled.")
-                xp = jnp_module
-                backend_name = "jax"
-                device_name = "cuda"
-                logger.info("JAX using CUDA.")
-            elif _is_apple_silicon_metal_available():
-                # Try Metal first, but fall back to CPU if it fails
+                logger.info("Attempting JAX CPU (forced by JAX_PLATFORM_NAME).")
                 try:
-                    # Test basic Metal functionality
-                    test_array = jnp_module.array([1.0, 2.0, 3.0])
-                    result = jnp_module.sum(test_array)
-                    if jnp_module.isfinite(result):
-                        # Metal works, but check if x64 is supported
+                    _test_jax_config(jnp_module, jax_module, "CPU (forced)", enable_x64=True)
+                    xp = jnp_module
+                    backend_name = "jax"
+                    device_name = "cpu"
+                except Exception as e:
+                    logger.warning(f"Forced JAX CPU (JAX_PLATFORM_NAME=cpu) backend failed: {e}")
+                    xp = None # Ensure xp is None if this attempt fails
+
+            # 2. CUDA (if not already successful and not forced CPU)
+            if xp is None and os.environ.get("JAX_PLATFORM_NAME") != "cpu":
+                if _is_nvidia_cuda_available(): # Helper includes a basic check
+                    logger.info("Attempting JAX CUDA backend.")
+                    try:
+                        _test_jax_config(jnp_module, jax_module, "CUDA", enable_x64=True)
+                        xp = jnp_module
+                        backend_name = "jax"
+                        device_name = "cuda"
+                    except Exception as e:
+                        logger.warning(f"JAX CUDA backend failed: {e}. Will try other JAX options.")
+                        xp = None 
+
+            # 3. Metal (if not already successful and not forced CPU)
+            if xp is None and os.environ.get("JAX_PLATFORM_NAME") != "cpu":
+                if _is_apple_silicon_metal_available(): # Helper includes a basic check
+                    logger.info("Attempting JAX Metal backend.")
+                    # Try x64 Metal
+                    try:
+                        _test_jax_config(jnp_module, jax_module, "Metal", enable_x64=True)
+                        xp = jnp_module
+                        backend_name = "jax"
+                        device_name = "metal"
+                    except Exception as e_x64:
+                        logger.warning(f"JAX Metal x64 mode failed: {e_x64}. Attempting Metal with float32.")
+                        xp = None # Reset before float32 attempt
+                        # Try float32 Metal
                         try:
-                            jax_module.config.update("jax_enable_x64", True)
-                            test_array_64 = jnp_module.array([1.0, 2.0, 3.0])
-                            result_64 = jnp_module.sum(test_array_64)
-                            if jnp_module.isfinite(result_64):
-                                xp = jnp_module
-                                backend_name = "jax"
-                                device_name = "metal"
-                                logger.info("JAX using Metal with x64 support.")
-                            else:
-                                raise Exception("Metal x64 test failed")
-                        except Exception as e:
-                            logger.warning(f"Metal x64 mode failed: {e}. Using Metal with float32.")
-                            # Reset JAX config and use float32
-                            jax_module.config.update("jax_enable_x64", False)
+                            _test_jax_config(jnp_module, jax_module, "Metal", enable_x64=False)
                             xp = jnp_module
                             backend_name = "jax"
                             device_name = "metal_float32"
-                            logger.info("JAX using Metal (float32 only).")
-                    else:
-                        raise Exception("Metal basic test failed")
-                except Exception as e:
-                    logger.warning(f"Metal backend failed: {e}. Falling back to JAX CPU.")
-                    # Force JAX to use CPU by setting environment variable and restarting
-                    # Since JAX has already initialized Metal, we need to work around this
-                    # The simplest approach is to fail gracefully and let the user set JAX_PLATFORM_NAME=cpu
-                    logger.warning("To use JAX CPU instead of Metal, set environment variable: JAX_PLATFORM_NAME=cpu")
-                    raise BackendNotAvailableError(f"JAX Metal failed and cannot switch to CPU in same process: {e}")
-            else:
-                # JAX on CPU (fallback)
-                # Verify JAX CPU backend is functional
+                        except Exception as e_f32:
+                            logger.warning(f"JAX Metal float32 mode also failed: {e_f32}. Will try JAX CPU fallback.")
+                            xp = None
+            
+            # 4. JAX CPU (general fallback, if not already successful)
+            if xp is None:
+                # This attempt runs if:
+                # - JAX_PLATFORM_NAME was not 'cpu' (or was 'cpu' but that specific attempt failed, leaving xp=None)
+                # - AND GPU attempts (CUDA, Metal) failed or were not applicable, leaving xp=None.
+                logger.info("Attempting JAX CPU backend (general fallback).")
                 try:
-                    # Configure JAX for double precision (float64) - CPU should support this
-                    jax_module.config.update("jax_enable_x64", True)
-                    logger.info("JAX double precision (x64) enabled.")
-                    # Test basic JAX functionality
-                    test_array = jnp_module.array([1.0, 2.0, 3.0])
-                    result = jnp_module.sum(test_array)
-                    # If we can create arrays and do basic operations, JAX CPU is working
-                    if jnp_module.isfinite(result):
-                        xp = jnp_module
-                        backend_name = "jax"
-                        device_name = "cpu"
-                        logger.info("JAX using CPU.")
-                    else:
-                        raise BackendNotAvailableError("JAX CPU test produced invalid result.")
+                    # Note: JAX might be "stuck" on a previous GPU attempt.
+                    # Setting JAX_PLATFORM_NAME before import is most robust. This is a best effort.
+                    _test_jax_config(jnp_module, jax_module, "CPU (fallback)", enable_x64=True)
+                    xp = jnp_module
+                    backend_name = "jax"
+                    device_name = "cpu"
                 except Exception as e:
-                    logger.warning(f"JAX CPU test failed: {e}")
-                    raise BackendNotAvailableError(f"JAX CPU backend test failed: {e}")
+                    logger.warning(f"JAX CPU backend (general fallback) failed: {e}")
+                    xp = None
 
-        except ImportError:
+            # Post JAX attempts:
+            if xp is not None: # JAX successfully initialized
+                logger.info(f"Successfully initialized JAX backend on {device_name} with {('x64' if jax_module.config.jax_enable_x64 else 'float32')} precision.")
+                # Caching and return will happen outside this try-except block for JAX import
+            elif requested_backend == "jax": # JAX requested, but xp is None (all JAX attempts failed)
+                raise BackendNotAvailableError(
+                    "JAX backend was requested, but all JAX initialization attempts "
+                    "(tried forced CPU, CUDA, Metal, and CPU fallback) failed."
+                )
+            # If "auto" and JAX failed (xp is None), proceed to NumPy block naturally
+
+        except ImportError: # JAX itself not found
             logger.info("JAX not found.")
             if requested_backend == "jax":
                 raise BackendNotAvailableError("JAX backend was requested, but JAX is not installed.")
-        except BackendNotAvailableError:
+            # For "auto", xp remains None, will fall through to NumPy.
+        except Exception as e: # Catch any other unexpected error during JAX setup phase
+            logger.warning(f"An unexpected error occurred during JAX backend setup: {e}", exc_info=True)
             if requested_backend == "jax":
-                raise
-            logger.warning("JAX backend failed to initialize. Falling back to NumPy.")
-        except Exception as e:
-            logger.warning(f"JAX backend failed with unexpected error: {e}")
-            if requested_backend == "jax":
-                raise BackendNotAvailableError(f"JAX backend failed: {e}")
-            logger.warning("Falling back to NumPy.")
+                raise BackendNotAvailableError(f"JAX backend setup failed with an unexpected error: {e}")
+            # For "auto", ensure xp is None to allow NumPy fallback.
+            xp = None
 
-        # If we successfully initialized JAX, return it
-        if backend_name == "jax":
-            logger.info(f"Successfully initialized JAX backend on {device_name}.")
-            return xp, backend_name, device_name
+    # If JAX was initialized successfully, cache and return
+    if xp is not None and backend_name == "jax":
+        _BACKEND_INFO = {
+            'module': xp, 'name': backend_name, 'device': device_name,
+            'requested_backend_mode': requested_backend
+        }
+        logger.debug(f"Caching and returning JAX backend: {backend_name} on {device_name}")
+        return xp, backend_name, device_name
 
     # --- NumPy Attempt or Fallback ---
-    if xp is None: # If JAX wasn't successfully initialized or "numpy" was requested
-        if requested_backend == "jax" and backend_name is None:
-            # This case should ideally be caught by specific errors above,
-            # but as a safeguard: if JAX was requested and not set up, error out.
-            raise BackendNotAvailableError("JAX backend was requested, but failed to initialize and no fallback was specified.")
-
+    # Reached if:
+    # - requested_backend == "numpy" (xp would be None from JAX block)
+    # - requested_backend == "auto" AND JAX attempts failed (xp is None)
+    if requested_backend == "numpy" or (requested_backend == "auto" and xp is None):
+        logger.info("Attempting NumPy backend.")
         try:
             np_module = importlib.import_module("numpy")
-            xp = np_module
-            backend_name = "numpy"
-            device_name = "cpu" # NumPy always runs on CPU
+            # Use temporary variables for NumPy in case JAX was partially set then failed unexpectedly
+            # However, the logic above should ensure xp is None if JAX final init failed.
+            xp_numpy = np_module
+            backend_name_numpy = "numpy"
+            device_name_numpy = "cpu" # NumPy always runs on CPU
+            
             logger.info("Using NumPy backend on CPU.")
+
             if requested_backend == "auto" and importlib.util.find_spec("jax") is not None:
+                 # This implies JAX is installed but failed to initialize.
                  logger.warning(
                     "JAX is installed, but 'auto' mode failed to initialize a JAX backend. "
-                    "Falling back to NumPy. Check JAX installation and GPU drivers if JAX/GPU was expected."
+                    "Falling back to NumPy. Check JAX installation, GPU drivers, and logs for JAX errors."
                 )
+            
+            _BACKEND_INFO = {
+                'module': xp_numpy, 'name': backend_name_numpy, 'device': device_name_numpy,
+                'requested_backend_mode': requested_backend
+            }
+            logger.debug(f"Caching and returning NumPy backend: {backend_name_numpy} on {device_name_numpy}")
+            return xp_numpy, backend_name_numpy, device_name_numpy
 
         except ImportError:
             logger.error("NumPy not found. This is a critical error.")
             # This is a very unlikely scenario in a scientific Python environment
-            raise BackendNotAvailableError("NumPy is not installed, which is required.")
+            raise BackendNotAvailableError("NumPy is not installed, which is required for fallback or direct request.")
 
-    if xp is None or backend_name is None:
-        # Should be caught by earlier specific errors.
-        raise BackendNotAvailableError(f"Could not initialize any backend for request '{requested_backend}'.")
-
-    _BACKEND_INFO = {
-        'module': xp,
-        'name': backend_name,
-        'device': device_name,
-        'requested_backend_mode': requested_backend # Store the mode that led to this config
-    }
-    return xp, backend_name, device_name
+    # If we reach here, something went fundamentally wrong, and no backend was initialized.
+    # This should ideally be caught by more specific error handling above.
+    final_error_msg = f"Could not initialize any backend for request '{requested_backend}'. All attempts failed."
+    if requested_backend == "auto" and importlib.util.find_spec("jax") is not None and xp is None:
+        final_error_msg += " JAX was found but all initialization attempts failed. NumPy also failed or was not correctly processed."
+    elif requested_backend == "jax" and xp is None : # Double check, should have been caught
+        final_error_msg = "JAX backend was requested, but all JAX initialization attempts failed. This is the final error."
+    
+    raise BackendNotAvailableError(final_error_msg)
 
 # Constants for fast normal log PDF computation
 _LOG_2PI = 1.8378770664093453  # np.log(2 * np.pi) precomputed
